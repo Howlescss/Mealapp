@@ -8,6 +8,7 @@ import os
 import re
 import json
 import math
+import uuid
 import random
 import base64
 from datetime import datetime
@@ -42,35 +43,114 @@ st.set_page_config(
 )
 
 # ==========================================
-# BAZĂ DE DATE LOCALĂ PERMANENTĂ (JSON)
+# SISTEM DE PERSISTENȚĂ & CACHE PE FIECARE DISPOZITIV
 # ==========================================
-DB_FILE = "nutritie_db.json"
+DEVICES_DB_FILE = "nutritie_devices_db.json"
+LEGACY_DB_FILE = "nutritie_db.json"
 
-def load_local_db():
+@st.cache_resource
+def get_global_memory_cache():
+    """Memorie RAM persistentă pe server între reîncărcări (F5) și sesiuni."""
+    store = {}
+    if os.path.exists(DEVICES_DB_FILE):
+        try:
+            with open(DEVICES_DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    store.update(data)
+        except Exception:
+            pass
+    return store
+
+def load_legacy_defaults():
     default_db = {
         "preturi_magazine": {},
         "catalog_nutritie": {},
         "retetar_favorite": [],
         "profil_utilizator": {}
     }
-    if os.path.exists(DB_FILE):
+    if os.path.exists(LEGACY_DB_FILE):
         try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
+            with open(LEGACY_DB_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 for k in default_db:
-                    if k not in data:
-                        data[k] = default_db[k]
-                return data
+                    if k in data:
+                        default_db[k] = data[k]
         except Exception:
-            return default_db
+            pass
     return default_db
 
-def save_local_db(db_data):
+def get_or_create_device_uid():
+    """Preia ID-ul dispozitivului din URL sau generează unul nou sincronizat cu localStorage."""
+    q_uid = st.query_params.get("uid", "")
+    if isinstance(q_uid, list):
+        q_uid = q_uid[0] if q_uid else ""
+    q_uid = re.sub(r"[^a-zA-Z0-9_-]", "", str(q_uid))
+
+    if q_uid and len(q_uid) >= 6:
+        st.session_state.device_uid = q_uid
+        return q_uid
+
+    if "device_uid" in st.session_state and st.session_state.device_uid:
+        st.query_params["uid"] = st.session_state.device_uid
+        return st.session_state.device_uid
+
+    new_uid = "dev_" + uuid.uuid4().hex[:10]
+    st.session_state.device_uid = new_uid
+    st.query_params["uid"] = new_uid
+    return new_uid
+
+PERSISTENT_KEYS = [
+    "sex", "varsta", "inaltime", "greutate", "activitate", "obiectiv",
+    "ritm_slabire", "distributie_macro", "bf_proc", "stagnare_cals",
+    "prot_tinta", "carb_tinta", "gras_tinta", "kcal_tinta",
+    "zile", "persoane", "buget_min", "buget_max",
+    "magazine_selectate", "zi_cumparaturi", "echipamente",
+    "alergeni", "alte_restrictii", "preferinte_medicale",
+    "tip_reteta", "batch_cooking", "camara", "config_mese",
+    "plan_retete", "retetar_favorite", "include_favorites",
+    "mese_de_pastrat", "retete_respinse", "varianta_meniu", "water_ml"
+]
+
+def save_device_state():
+    """Salvează instantaneu toată starea dispozitivului curent în RAM Cache + fișier JSON."""
+    if not st.session_state.get("init_done"):
+        return
+    uid = st.session_state.get("device_uid")
+    if not uid:
+        return
+
+    mem_cache = get_global_memory_cache()
+    snapshot = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "db": st.session_state.get("db", {}),
+    }
+    for k in PERSISTENT_KEYS:
+        if k in st.session_state:
+            snapshot[k] = st.session_state[k]
+
+    if st.session_state.get("plan_df") is not None and isinstance(st.session_state.plan_df, pd.DataFrame):
+        snapshot["plan_df_records"] = st.session_state.plan_df.to_dict(orient="records")
+    else:
+        snapshot["plan_df_records"] = None
+
+    mem_cache[uid] = snapshot
     try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(db_data, f, ensure_ascii=False, indent=2)
+        with open(DEVICES_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(mem_cache, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+def load_device_state(uid):
+    """Încarcă starea salvată a dispozitivului curent (dacă există)."""
+    mem_cache = get_global_memory_cache()
+    if uid in mem_cache and isinstance(mem_cache[uid], dict):
+        return mem_cache[uid]
+    return None
+
+def save_local_db(db_data):
+    st.session_state.db = db_data
+    save_device_state()
 
 # ==========================================
 # LOGO-URI MAGAZINE (CĂUTARE INTELIGENTĂ + SVG INTEGRAT)
@@ -201,7 +281,7 @@ def render_macros_pie_chart(prot_g, carb_g, gras_g):
         st.markdown(donut_html, unsafe_allow_html=True)
 
 # ==========================================
-# CATALOG MULTI-VARIAT DE REȚETE & ALTERNATIVE (PENTRU REGENERARE GARANTATĂ)
+# CATALOG MULTI-VARIAT DE REȚETE & ALTERNATIVE
 # ==========================================
 MEAL_ALTERNATIVES_CATALOG = {
     "Mic dejun": [
@@ -210,9 +290,9 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "12 min",
             "aparate": ["Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 165, "unit_label": "3 buc", "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 3.45, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
-                {"produs": "Brânză Cottage Light", "categorie": "Lactate & Ouă", "cant_pers_g": 120, "unit_label": "120g", "ambalaj": "Cutie 200g", "pret_amb": 5.49, "pret_portie": 3.30, "kcal_100": 92, "p_100": 13.0, "c_100": 3.2, "g_100": 3.0},
-                {"produs": "Fulgi de ovăz & Fructe de pădure", "categorie": "Băcănie", "cant_pers_g": 55, "unit_label": "55g", "ambalaj": "Pachet 500g", "pret_amb": 10.90, "pret_portie": 2.40, "kcal_100": 365, "p_100": 13.0, "c_100": 60.0, "g_100": 6.5}
+                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 165, "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 3.45, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
+                {"produs": "Brânză Cottage Light", "categorie": "Lactate & Ouă", "cant_pers_g": 120, "ambalaj": "Cutie 200g", "pret_amb": 5.49, "pret_portie": 3.30, "kcal_100": 92, "p_100": 13.0, "c_100": 3.2, "g_100": 3.0},
+                {"produs": "Fulgi de ovăz & Fructe de pădure", "categorie": "Băcănie", "cant_pers_g": 55, "ambalaj": "Pachet 500g", "pret_amb": 10.90, "pret_portie": 2.40, "kcal_100": 365, "p_100": 13.0, "c_100": 60.0, "g_100": 6.5}
             ],
             "pasi": [
                 "Bate ouăle cu sare și piper și gătește-le în tigaia antiaderentă timp de 4 minute.",
@@ -225,10 +305,10 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "15 min",
             "aparate": ["Aragaz (Plită)", "Blender"],
             "ingrediente_baza": [
-                {"produs": "Iaurt Skyr / Grecesc 2%", "categorie": "Lactate & Ouă", "cant_pers_g": 150, "unit_label": "150g", "ambalaj": "Pahar 400g", "pret_amb": 7.99, "pret_portie": 3.00, "kcal_100": 65, "p_100": 11.0, "c_100": 4.0, "g_100": 0.5},
-                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "unit_label": "2 buc", "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
-                {"produs": "Fulgi de ovăz fini", "categorie": "Băcănie", "cant_pers_g": 60, "unit_label": "60g", "ambalaj": "Pungă 500g", "pret_amb": 4.99, "pret_portie": 1.20, "kcal_100": 370, "p_100": 13.5, "c_100": 58.0, "g_100": 7.0},
-                {"produs": "Banană coaptă", "categorie": "Legume & Fructe", "cant_pers_g": 100, "unit_label": "1 buc", "ambalaj": "Mănunchi 1kg", "pret_amb": 6.99, "pret_portie": 1.50, "kcal_100": 89, "p_100": 1.1, "c_100": 22.8, "g_100": 0.3}
+                {"produs": "Iaurt Skyr / Grecesc 2%", "categorie": "Lactate & Ouă", "cant_pers_g": 150, "ambalaj": "Pahar 400g", "pret_amb": 7.99, "pret_portie": 3.00, "kcal_100": 65, "p_100": 11.0, "c_100": 4.0, "g_100": 0.5},
+                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
+                {"produs": "Fulgi de ovăz fini", "categorie": "Băcănie", "cant_pers_g": 60, "ambalaj": "Pungă 500g", "pret_amb": 4.99, "pret_portie": 1.20, "kcal_100": 370, "p_100": 13.5, "c_100": 58.0, "g_100": 7.0},
+                {"produs": "Banană coaptă", "categorie": "Legume & Fructe", "cant_pers_g": 100, "ambalaj": "Mănunchi 1kg", "pret_amb": 6.99, "pret_portie": 1.50, "kcal_100": 89, "p_100": 1.1, "c_100": 22.8, "g_100": 0.3}
             ],
             "pasi": [
                 "Amestecă în blender ovăzul, ouăle și jumătate de banană până obții un aluat omogen.",
@@ -241,10 +321,10 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "10 min",
             "aparate": ["Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Lipie Tortilla Integrală", "categorie": "Panificație", "cant_pers_g": 65, "unit_label": "1 lipie", "ambalaj": "Pachet 6 buc", "pret_amb": 8.49, "pret_portie": 1.60, "kcal_100": 295, "p_100": 8.5, "c_100": 48.0, "g_100": 6.0},
-                {"produs": "Șuncă piept de curcan", "categorie": "Mezeluri & Carne", "cant_pers_g": 100, "unit_label": "100g", "ambalaj": "Pachet 200g", "pret_amb": 10.90, "pret_portie": 5.45, "kcal_100": 105, "p_100": 21.0, "c_100": 1.0, "g_100": 2.0},
-                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "unit_label": "2 buc", "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
-                {"produs": "Cașcaval Light / Mozzarella", "categorie": "Lactate & Ouă", "cant_pers_g": 40, "unit_label": "40g", "ambalaj": "Pachet 250g", "pret_amb": 11.90, "pret_portie": 1.90, "kcal_100": 250, "p_100": 26.0, "c_100": 1.0, "g_100": 15.0}
+                {"produs": "Lipie Tortilla Integrală", "categorie": "Panificație", "cant_pers_g": 65, "ambalaj": "Pachet 6 buc", "pret_amb": 8.49, "pret_portie": 1.60, "kcal_100": 295, "p_100": 8.5, "c_100": 48.0, "g_100": 6.0},
+                {"produs": "Șuncă piept de curcan", "categorie": "Mezeluri & Carne", "cant_pers_g": 100, "ambalaj": "Pachet 200g", "pret_amb": 10.90, "pret_portie": 5.45, "kcal_100": 105, "p_100": 21.0, "c_100": 1.0, "g_100": 2.0},
+                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
+                {"produs": "Cașcaval Light / Mozzarella", "categorie": "Lactate & Ouă", "cant_pers_g": 40, "ambalaj": "Pachet 250g", "pret_amb": 11.90, "pret_portie": 1.90, "kcal_100": 250, "p_100": 26.0, "c_100": 1.0, "g_100": 15.0}
             ],
             "pasi": [
                 "Gătește rapid ouăle jumări cu șunca de curcan tăiată fâșii în tigaie.",
@@ -253,14 +333,14 @@ MEAL_ALTERNATIVES_CATALOG = {
             "depozitare": "Învelește în folie alimentară; se poate încălzi rapid la tigaie sau microunde."
         },
         {
-            "nume": "Toast cu avocado, ouă poșate și brânză Feta / Telemea light",
+            "nume": "Toast cu ouă poșate, telemea light și roșii cherry",
             "timp": "12 min",
             "aparate": ["Aragaz (Plită)", "Toaster"],
             "ingrediente_baza": [
-                {"produs": "Pâine integrală cu semințe", "categorie": "Panificație", "cant_pers_g": 80, "unit_label": "2 felii", "ambalaj": "Pâine 500g", "pret_amb": 7.49, "pret_portie": 1.50, "kcal_100": 250, "p_100": 9.5, "c_100": 42.0, "g_100": 4.5},
-                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "unit_label": "2 buc", "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
-                {"produs": "Telemea Light / Brânză Feta", "categorie": "Lactate & Ouă", "cant_pers_g": 70, "unit_label": "70g", "ambalaj": "Cutie 200g", "pret_amb": 9.90, "pret_portie": 3.45, "kcal_100": 195, "p_100": 18.0, "c_100": 1.0, "g_100": 13.0},
-                {"produs": "Roșii cherry & Castravete", "categorie": "Legume & Fructe", "cant_pers_g": 120, "unit_label": "120g", "ambalaj": "Caserolă 250g", "pret_amb": 6.99, "pret_portie": 2.80, "kcal_100": 22, "p_100": 1.0, "c_100": 4.0, "g_100": 0.2}
+                {"produs": "Pâine integrală cu semințe", "categorie": "Panificație", "cant_pers_g": 80, "ambalaj": "Pâine 500g", "pret_amb": 7.49, "pret_portie": 1.50, "kcal_100": 250, "p_100": 9.5, "c_100": 42.0, "g_100": 4.5},
+                {"produs": "Ouă proaspete M", "categorie": "Lactate & Ouă", "cant_pers_g": 110, "ambalaj": "Cofraj 10 buc", "pret_amb": 11.50, "pret_portie": 2.30, "kcal_100": 143, "p_100": 12.6, "c_100": 0.7, "g_100": 9.5},
+                {"produs": "Telemea Light / Brânză Feta", "categorie": "Lactate & Ouă", "cant_pers_g": 70, "ambalaj": "Cutie 200g", "pret_amb": 9.90, "pret_portie": 3.45, "kcal_100": 195, "p_100": 18.0, "c_100": 1.0, "g_100": 13.0},
+                {"produs": "Roșii cherry & Castravete", "categorie": "Legume & Fructe", "cant_pers_g": 120, "ambalaj": "Caserolă 250g", "pret_amb": 6.99, "pret_portie": 2.80, "kcal_100": 22, "p_100": 1.0, "c_100": 4.0, "g_100": 0.2}
             ],
             "pasi": [
                 "Prăjește feliile de pâine integrală și sfărâmă brânza telemea light deasupra.",
@@ -275,9 +355,9 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "25 min",
             "aparate": ["Aragaz (Plită)", "Air Fryer"],
             "ingrediente_baza": [
-                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 220, "unit_label": "220g", "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 8.90, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
-                {"produs": "Orez Basmati", "categorie": "Băcănie", "cant_pers_g": 85, "unit_label": "85g", "ambalaj": "Pungă 1kg", "pret_amb": 9.90, "pret_portie": 2.50, "kcal_100": 350, "p_100": 7.5, "c_100": 77.0, "g_100": 0.9},
-                {"produs": "Mix salată & roșii cherry", "categorie": "Legume & Fructe", "cant_pers_g": 130, "unit_label": "130g", "ambalaj": "Pungă salată", "pret_amb": 11.50, "pret_portie": 3.20, "kcal_100": 25, "p_100": 1.2, "c_100": 4.0, "g_100": 0.3}
+                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 220, "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 8.90, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
+                {"produs": "Orez Basmati", "categorie": "Băcănie", "cant_pers_g": 85, "ambalaj": "Pungă 1kg", "pret_amb": 9.90, "pret_portie": 2.50, "kcal_100": 350, "p_100": 7.5, "c_100": 77.0, "g_100": 0.9},
+                {"produs": "Mix salată & roșii cherry", "categorie": "Legume & Fructe", "cant_pers_g": 130, "ambalaj": "Pungă salată", "pret_amb": 11.50, "pret_portie": 3.20, "kcal_100": 25, "p_100": 1.2, "c_100": 4.0, "g_100": 0.3}
             ],
             "pasi": [
                 "Condimentează pieptul de pui cu boia dulce, usturoi granulat, sare și piper, apoi gătește-l la Air Fryer sau tigaie 15 minute.",
@@ -290,9 +370,9 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "25 min",
             "aparate": ["Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Carne tocată slabă vită/curcan", "categorie": "Carne & Pește", "cant_pers_g": 200, "unit_label": "200g", "ambalaj": "Caserolă 500g", "pret_amb": 21.90, "pret_portie": 8.80, "kcal_100": 145, "p_100": 21.5, "c_100": 0.0, "g_100": 6.5},
-                {"produs": "Paste integrale Penne/Fusilli", "categorie": "Băcănie", "cant_pers_g": 85, "unit_label": "85g", "ambalaj": "Pachet 500g", "pret_amb": 5.99, "pret_portie": 1.80, "kcal_100": 345, "p_100": 12.5, "c_100": 66.0, "g_100": 2.5},
-                {"produs": "Sos de roșii Passata & busuioc", "categorie": "Băcănie", "cant_pers_g": 150, "unit_label": "150ml", "ambalaj": "Sticlă 500g", "pret_amb": 6.49, "pret_portie": 2.20, "kcal_100": 32, "p_100": 1.5, "c_100": 6.0, "g_100": 0.2}
+                {"produs": "Carne tocată slabă vită/curcan", "categorie": "Carne & Pește", "cant_pers_g": 200, "ambalaj": "Caserolă 500g", "pret_amb": 21.90, "pret_portie": 8.80, "kcal_100": 145, "p_100": 21.5, "c_100": 0.0, "g_100": 6.5},
+                {"produs": "Paste integrale Penne/Fusilli", "categorie": "Băcănie", "cant_pers_g": 85, "ambalaj": "Pachet 500g", "pret_amb": 5.99, "pret_portie": 1.80, "kcal_100": 345, "p_100": 12.5, "c_100": 66.0, "g_100": 2.5},
+                {"produs": "Sos de roșii Passata & busuioc", "categorie": "Băcănie", "cant_pers_g": 150, "ambalaj": "Sticlă 500g", "pret_amb": 6.49, "pret_portie": 2.20, "kcal_100": 32, "p_100": 1.5, "c_100": 6.0, "g_100": 0.2}
             ],
             "pasi": [
                 "Rumenește carnea tocată în tigaia antiaderentă timp de 8-10 minute, apoi adaugă sosul de roșii, usturoi și oregano.",
@@ -301,13 +381,13 @@ MEAL_ALTERNATIVES_CATALOG = {
             "depozitare": "Excelent pentru caserole (Batch Cooking) — devine și mai gustos a doua zi."
         },
         {
-            "nume": "Mușchiuleț de porc slab la cuptor cu cartofi aurii și murături/salată",
+            "nume": "Mușchiuleț de porc slab la cuptor cu cartofi aurii și salată",
             "timp": "30 min",
             "aparate": ["Cuptor", "Air Fryer"],
             "ingrediente_baza": [
-                {"produs": "Mușchiuleț / Cotlet de porc fără grăsime", "categorie": "Carne & Pește", "cant_pers_g": 210, "unit_label": "210g", "ambalaj": "Caserolă 600g", "pret_amb": 23.90, "pret_portie": 8.40, "kcal_100": 135, "p_100": 22.0, "c_100": 0.0, "g_100": 4.8},
-                {"produs": "Cartofi albi/roșii pentru copt", "categorie": "Legume & Fructe", "cant_pers_g": 250, "unit_label": "250g", "ambalaj": "Sac 2kg", "pret_amb": 7.99, "pret_portie": 2.00, "kcal_100": 77, "p_100": 2.0, "c_100": 17.0, "g_100": 0.1},
-                {"produs": "Salată de varză / castraveți murați", "categorie": "Legume & Fructe", "cant_pers_g": 150, "unit_label": "150g", "ambalaj": "Borcan / Buc", "pret_amb": 8.50, "pret_portie": 2.50, "kcal_100": 25, "p_100": 1.0, "c_100": 4.5, "g_100": 0.2}
+                {"produs": "Mușchiuleț / Cotlet de porc fără grăsime", "categorie": "Carne & Pește", "cant_pers_g": 210, "ambalaj": "Caserolă 600g", "pret_amb": 23.90, "pret_portie": 8.40, "kcal_100": 135, "p_100": 22.0, "c_100": 0.0, "g_100": 4.8},
+                {"produs": "Cartofi albi/roșii pentru copt", "categorie": "Legume & Fructe", "cant_pers_g": 250, "ambalaj": "Sac 2kg", "pret_amb": 7.99, "pret_portie": 2.00, "kcal_100": 77, "p_100": 2.0, "c_100": 17.0, "g_100": 0.1},
+                {"produs": "Salată de varză / castraveți murați", "categorie": "Legume & Fructe", "cant_pers_g": 150, "ambalaj": "Borcan / Buc", "pret_amb": 8.50, "pret_portie": 2.50, "kcal_100": 25, "p_100": 1.0, "c_100": 4.5, "g_100": 0.2}
             ],
             "pasi": [
                 "Taie cartofii wedges, condimentează-i cu rozmarin și boia și pune-i la cuptor sau Air Fryer 22 minute.",
@@ -320,9 +400,9 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "22 min",
             "aparate": ["Air Fryer", "Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Burger de vită / Carne vită", "categorie": "Carne & Pește", "cant_pers_g": 180, "unit_label": "180g", "ambalaj": "Caserolă 400g", "pret_amb": 19.90, "pret_portie": 8.95, "kcal_100": 165, "p_100": 20.5, "c_100": 0.0, "g_100": 9.0},
-                {"produs": "Chiflă Burger cu susan", "categorie": "Panificație", "cant_pers_g": 65, "unit_label": "1 chiflă", "ambalaj": "Pachet 4 buc", "pret_amb": 6.49, "pret_portie": 1.65, "kcal_100": 270, "p_100": 8.5, "c_100": 49.0, "g_100": 4.0},
-                {"produs": "Cartofi pentru Air Fryer", "categorie": "Legume & Fructe", "cant_pers_g": 180, "unit_label": "180g", "ambalaj": "1 kg", "pret_amb": 4.99, "pret_portie": 1.50, "kcal_100": 77, "p_100": 2.0, "c_100": 17.0, "g_100": 0.1}
+                {"produs": "Burger de vită / Carne vită", "categorie": "Carne & Pește", "cant_pers_g": 180, "ambalaj": "Caserolă 400g", "pret_amb": 19.90, "pret_portie": 8.95, "kcal_100": 165, "p_100": 20.5, "c_100": 0.0, "g_100": 9.0},
+                {"produs": "Chiflă Burger cu susan", "categorie": "Panificație", "cant_pers_g": 65, "ambalaj": "Pachet 4 buc", "pret_amb": 6.49, "pret_portie": 1.65, "kcal_100": 270, "p_100": 8.5, "c_100": 49.0, "g_100": 4.0},
+                {"produs": "Cartofi pentru Air Fryer", "categorie": "Legume & Fructe", "cant_pers_g": 180, "ambalaj": "1 kg", "pret_amb": 4.99, "pret_portie": 1.50, "kcal_100": 77, "p_100": 2.0, "c_100": 17.0, "g_100": 0.1}
             ],
             "pasi": [
                 "Frige burgerul de vită pe tigaia grill sau în Air Fryer câte 5 minute pe fiecare parte.",
@@ -337,8 +417,8 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "25 min",
             "aparate": ["Cuptor", "Air Fryer"],
             "ingrediente_baza": [
-                {"produs": "File de somon / păstrăv", "categorie": "Carne & Pește", "cant_pers_g": 180, "unit_label": "180g", "ambalaj": "Caserolă 400g", "pret_amb": 24.90, "pret_portie": 11.20, "kcal_100": 185, "p_100": 20.5, "c_100": 0.0, "g_100": 11.0},
-                {"produs": "Cartofi dulci", "categorie": "Legume & Fructe", "cant_pers_g": 200, "unit_label": "200g", "ambalaj": "1 kg", "pret_amb": 8.99, "pret_portie": 3.20, "kcal_100": 86, "p_100": 1.6, "c_100": 20.1, "g_100": 0.1}
+                {"produs": "File de somon / păstrăv", "categorie": "Carne & Pește", "cant_pers_g": 180, "ambalaj": "Caserolă 400g", "pret_amb": 24.90, "pret_portie": 11.20, "kcal_100": 185, "p_100": 20.5, "c_100": 0.0, "g_100": 11.0},
+                {"produs": "Cartofi dulci", "categorie": "Legume & Fructe", "cant_pers_g": 200, "ambalaj": "1 kg", "pret_amb": 8.99, "pret_portie": 3.20, "kcal_100": 86, "p_100": 1.6, "c_100": 20.1, "g_100": 0.1}
             ],
             "pasi": [
                 "Taie cartofii dulci cuburi și coace-i la 200°C sau Air Fryer timp de 18 minute.",
@@ -351,10 +431,10 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "15 min",
             "aparate": ["Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 170, "unit_label": "170g", "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 6.50, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
-                {"produs": "Lipie Tortilla Integrală", "categorie": "Panificație", "cant_pers_g": 65, "unit_label": "1 lipie", "ambalaj": "Pachet 6 buc", "pret_amb": 8.49, "pret_portie": 1.60, "kcal_100": 295, "p_100": 8.5, "c_100": 48.0, "g_100": 6.0},
-                {"produs": "Mozzarella Light rasă", "categorie": "Lactate & Ouă", "cant_pers_g": 55, "unit_label": "55g", "ambalaj": "Pachet 250g", "pret_amb": 11.90, "pret_portie": 2.60, "kcal_100": 250, "p_100": 26.0, "c_100": 1.0, "g_100": 15.0},
-                {"produs": "Porumb dulce & Ardei kapia", "categorie": "Legume & Fructe", "cant_pers_g": 80, "unit_label": "80g", "ambalaj": "Conservă 340g", "pret_amb": 4.99, "pret_portie": 1.40, "kcal_100": 85, "p_100": 2.9, "c_100": 15.0, "g_100": 1.2}
+                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 170, "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 6.50, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
+                {"produs": "Lipie Tortilla Integrală", "categorie": "Panificație", "cant_pers_g": 65, "ambalaj": "Pachet 6 buc", "pret_amb": 8.49, "pret_portie": 1.60, "kcal_100": 295, "p_100": 8.5, "c_100": 48.0, "g_100": 6.0},
+                {"produs": "Mozzarella Light rasă", "categorie": "Lactate & Ouă", "cant_pers_g": 55, "ambalaj": "Pachet 250g", "pret_amb": 11.90, "pret_portie": 2.60, "kcal_100": 250, "p_100": 26.0, "c_100": 1.0, "g_100": 15.0},
+                {"produs": "Porumb dulce & Ardei kapia", "categorie": "Legume & Fructe", "cant_pers_g": 80, "ambalaj": "Conservă 340g", "pret_amb": 4.99, "pret_portie": 1.40, "kcal_100": 85, "p_100": 2.9, "c_100": 15.0, "g_100": 1.2}
             ],
             "pasi": [
                 "Rumenește fâșiile de pui cu boia, chimion și ardei kapia timp de 8 minute.",
@@ -367,9 +447,9 @@ MEAL_ALTERNATIVES_CATALOG = {
             "timp": "15 min",
             "aparate": ["Aragaz (Plită)"],
             "ingrediente_baza": [
-                {"produs": "Piept de curcan dezosat", "categorie": "Carne & Pește", "cant_pers_g": 190, "unit_label": "190g", "ambalaj": "Caserolă 500g", "pret_amb": 24.90, "pret_portie": 9.40, "kcal_100": 108, "p_100": 24.0, "c_100": 0.0, "g_100": 1.2},
-                {"produs": "Couscous / Bulgur", "categorie": "Băcănie", "cant_pers_g": 70, "unit_label": "70g", "ambalaj": "Cutie 500g", "pret_amb": 6.99, "pret_portie": 1.40, "kcal_100": 355, "p_100": 12.0, "c_100": 72.0, "g_100": 1.5},
-                {"produs": "Mix salată, castraveți & măsline", "categorie": "Legume & Fructe", "cant_pers_g": 140, "unit_label": "140g", "ambalaj": "Pungă mix", "pret_amb": 9.50, "pret_portie": 2.80, "kcal_100": 45, "p_100": 1.5, "c_100": 5.0, "g_100": 2.0}
+                {"produs": "Piept de curcan dezosat", "categorie": "Carne & Pește", "cant_pers_g": 190, "ambalaj": "Caserolă 500g", "pret_amb": 24.90, "pret_portie": 9.40, "kcal_100": 108, "p_100": 24.0, "c_100": 0.0, "g_100": 1.2},
+                {"produs": "Couscous / Bulgur", "categorie": "Băcănie", "cant_pers_g": 70, "ambalaj": "Cutie 500g", "pret_amb": 6.99, "pret_portie": 1.40, "kcal_100": 355, "p_100": 12.0, "c_100": 72.0, "g_100": 1.5},
+                {"produs": "Mix salată, castraveți & măsline", "categorie": "Legume & Fructe", "cant_pers_g": 140, "ambalaj": "Pungă mix", "pret_amb": 9.50, "pret_portie": 2.80, "kcal_100": 45, "p_100": 1.5, "c_100": 5.0, "g_100": 2.0}
             ],
             "pasi": [
                 "Toarnă apă fierbinte peste couscous cu un praf de sare și acoperă-l 5 minute.",
@@ -378,13 +458,13 @@ MEAL_ALTERNATIVES_CATALOG = {
             "depozitare": "Rezistă perfect în caserolă 3 zile la frigider."
         },
         {
-            "nume": "Frigărui de pui/curcan la cuptor cu legume la grătar și sos tzatziki din iaurt",
+            "nume": "Frigărui de pui la cuptor cu legume la grătar și sos tzatziki",
             "timp": "20 min",
             "aparate": ["Cuptor", "Air Fryer"],
             "ingrediente_baza": [
-                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 200, "unit_label": "200g", "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 7.80, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
-                {"produs": "Dovlecei, ciuperci & ardei", "categorie": "Legume & Fructe", "cant_pers_g": 200, "unit_label": "200g", "ambalaj": "Caserolă 500g", "pret_amb": 9.90, "pret_portie": 3.50, "kcal_100": 28, "p_100": 2.2, "c_100": 4.5, "g_100": 0.3},
-                {"produs": "Iaurt Grecesc 2% (pt. Tzatziki)", "categorie": "Lactate & Ouă", "cant_pers_g": 120, "unit_label": "120g", "ambalaj": "Pahar 400g", "pret_amb": 6.99, "pret_portie": 2.10, "kcal_100": 68, "p_100": 9.5, "c_100": 3.8, "g_100": 2.0}
+                {"produs": "Piept de pui dezosat", "categorie": "Carne & Pește", "cant_pers_g": 200, "ambalaj": "Caserolă 1kg", "pret_amb": 28.90, "pret_portie": 7.80, "kcal_100": 110, "p_100": 23.1, "c_100": 0.0, "g_100": 1.5},
+                {"produs": "Dovlecei, ciuperci & ardei", "categorie": "Legume & Fructe", "cant_pers_g": 200, "ambalaj": "Caserolă 500g", "pret_amb": 9.90, "pret_portie": 3.50, "kcal_100": 28, "p_100": 2.2, "c_100": 4.5, "g_100": 0.3},
+                {"produs": "Iaurt Grecesc 2% (pt. Tzatziki)", "categorie": "Lactate & Ouă", "cant_pers_g": 120, "ambalaj": "Pahar 400g", "pret_amb": 6.99, "pret_portie": 2.10, "kcal_100": 68, "p_100": 9.5, "c_100": 3.8, "g_100": 2.0}
             ],
             "pasi": [
                 "Pune cuburile de pui și legumele condimentate la Air Fryer sau cuptor timp de 16 minute.",
@@ -437,7 +517,6 @@ def build_recipe_from_template(tpl, perioada, tip_masa, mult, mag, kcal_target_m
     }
 
 def rebuild_shopping_df_from_recipes(retete_list):
-    """Recalculează automat Lista de Cumpărături (plan_df) din rețetele active."""
     grouped = {}
     mag_default = st.session_state.magazine_selectate[0] if st.session_state.magazine_selectate else "Lidl"
     for r in retete_list:
@@ -607,7 +686,6 @@ def call_free_cloud_relay(contents, expect_json=False):
     return None, "Releu indisponibil"
 
 def build_smart_fallback_plan(varianta_offset=0):
-    """Generează de fiecare dată un alt meniu complet diferit, evitând rețetele respinse."""
     zile = st.session_state.zile
     pers = st.session_state.persoane
     batch = st.session_state.batch_cooking
@@ -754,7 +832,7 @@ def save_profile_to_db():
                 "carb_tinta", "gras_tinta", "kcal_tinta", "stagnare_cals"
             ]
         }
-        save_local_db(st.session_state.db)
+        save_device_state()
 
 def recalc_from_biometrics():
     for k in ['sex', 'varsta', 'inaltime', 'greutate', 'activitate', 'obiectiv', 'ritm_slabire', 'distributie_macro', 'bf_proc']:
@@ -773,13 +851,18 @@ def sync_manual_macros():
     save_profile_to_db()
 
 # ==========================================
-# STATE MANAGEMENT INIȚIAL
+# INIȚIALIZARE ȘI RESTAURARE AUTOMATĂ DIN CACHE PE DISPOZITIV
 # ==========================================
-if 'init_done' not in st.session_state:
-    db_loaded = load_local_db()
-    saved_prof = db_loaded.get("profil_utilizator", {})
-    st.session_state.update({
-        'db': db_loaded,
+current_uid = get_or_create_device_uid()
+
+if 'init_done' not in st.session_state or st.session_state.get('loaded_uid') != current_uid:
+    saved_device = load_device_state(current_uid)
+    legacy_db = load_legacy_defaults()
+    saved_prof = legacy_db.get("profil_utilizator", {})
+
+    defaults = {
+        'loaded_uid': current_uid,
+        'db': legacy_db,
         'sex': saved_prof.get('sex', "Masculin"),
         'varsta': int(saved_prof.get('varsta', 24)),
         'inaltime': int(saved_prof.get('inaltime', 175)),
@@ -801,15 +884,30 @@ if 'init_done' not in st.session_state:
         'tip_reteta': "Simplu și rapid <30 min", 'batch_cooking': False, 'camara': "",
         'tip_oferta': "Estimare prețuri actuale + Baza ta de bonuri", 'fisiere_poze': None,
         'config_mese': {}, 'plan_df': None, 'plan_retete': [],
-        'retetar_favorite': db_loaded.get("retetar_favorite", []),
+        'retetar_favorite': legacy_db.get("retetar_favorite", []),
         'include_favorites': [], 'mese_de_pastrat': [],
-        'retete_respinse': [], 'varianta_meniu': 0, 'preferinta_regenerare': "",
+        'retete_respinse': [], 'varianta_meniu': 0,
         'water_ml': 0, 'init_done': True
-    })
-    if not saved_prof:
-        recalc_from_biometrics()
+    }
 
-def sync(key): st.session_state[key] = st.session_state[f"ui_{key}"]
+    if saved_device:
+        if "db" in saved_device and isinstance(saved_device["db"], dict):
+            defaults["db"] = saved_device["db"]
+        for k in PERSISTENT_KEYS:
+            if k in saved_device:
+                defaults[k] = saved_device[k]
+        if saved_device.get("plan_df_records"):
+            defaults["plan_df"] = pd.DataFrame(saved_device["plan_df_records"])
+
+    st.session_state.update(defaults)
+    if not saved_device and not saved_prof:
+        recalc_from_biometrics()
+    save_device_state()
+
+def sync(key):
+    st.session_state[key] = st.session_state[f"ui_{key}"]
+    save_device_state()
+
 def init_ui(key):
     st.session_state[f"ui_{key}"] = st.session_state[key]
     return f"ui_{key}"
@@ -818,11 +916,13 @@ def sync_budget_from_inputs():
     st.session_state.buget_min = int(st.session_state.ui_buget_min)
     st.session_state.buget_max = max(int(st.session_state.ui_buget_min) + 10, int(st.session_state.ui_buget_max))
     st.session_state.ui_buget_slider = (st.session_state.buget_min, st.session_state.buget_max)
+    save_device_state()
 
 def sync_budget_from_slider():
     b_min, b_max = st.session_state.ui_buget_slider
     st.session_state.buget_min, st.session_state.buget_max = int(b_min), int(b_max)
     st.session_state.ui_buget_min, st.session_state.ui_buget_max = int(b_min), int(b_max)
+    save_device_state()
 
 def on_scale_change():
     st.session_state.zile = st.session_state.ui_zile
@@ -831,9 +931,16 @@ def on_scale_change():
     st.session_state.buget_max = 80 * st.session_state.zile * st.session_state.persoane
     st.session_state.ui_buget_min, st.session_state.ui_buget_max = st.session_state.buget_min, st.session_state.buget_max
     st.session_state.ui_buget_slider = (st.session_state.buget_min, st.session_state.buget_max)
+    save_device_state()
 
-def add_water(): st.session_state.water_ml = min(2500, st.session_state.water_ml + 250)
-def sub_water(): st.session_state.water_ml = max(0, st.session_state.water_ml - 250)
+def add_water():
+    st.session_state.water_ml = min(2500, st.session_state.water_ml + 250)
+    save_device_state()
+
+def sub_water():
+    st.session_state.water_ml = max(0, st.session_state.water_ml - 250)
+    save_device_state()
+
 def cut_tdee():
     st.session_state.stagnare_cals += 150
     recalc_from_biometrics()
@@ -842,7 +949,6 @@ def cut_tdee():
 # FUNCȚII DE ÎNLOCUIRE REȚETĂ INDIVIDUALĂ SAU MENIU COMPLET
 # ==========================================
 def replace_single_recipe(idx_reteta):
-    """Înlocuiește pe loc o singură rețetă cu o alternativă diferită și actualizează lista de cumpărături."""
     if idx_reteta < 0 or idx_reteta >= len(st.session_state.plan_retete):
         return
     old_r = st.session_state.plan_retete[idx_reteta]
@@ -871,9 +977,9 @@ def replace_single_recipe(idx_reteta):
     new_r = build_recipe_from_template(chosen_tpl, per, tip_m, portii, mag, kcal_m, p_m, c_m, g_m)
     st.session_state.plan_retete[idx_reteta] = new_r
     st.session_state.plan_df = rebuild_shopping_df_from_recipes(st.session_state.plan_retete)
+    save_device_state()
 
 def run_full_menu_generation(is_regeneration=False, custom_hint=""):
-    """Generează sau regenerează întregul plan alimentar + lista de cumpărături, păstrând rețetele blocate cu 🔒."""
     kcal_zi_tinta = st.session_state.kcal_tinta
     mag = ", ".join(st.session_state.magazine_selectate) if st.session_state.magazine_selectate else "Lidl"
     echip = ", ".join(st.session_state.echipamente)
@@ -883,7 +989,7 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
     if is_regeneration and st.session_state.plan_retete:
         st.session_state.varianta_meniu += 1
         for i, r in enumerate(st.session_state.plan_retete):
-            if st.session_state.get(f"lock_{i}", False):
+            if st.session_state.get(f"lock_{i}", False) or r.get("nume", "") in st.session_state.get("mese_de_pastrat", []):
                 locked_recipes.append((i, r))
             else:
                 r_name = r.get("nume", "")
@@ -945,7 +1051,6 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
 
     retete_list = data_parsed.get("retete", [])
 
-    # Dacă AI-ul a returnat din greșeală aceleași rețete la regenerare, forțăm rotația din catalogul variat
     if is_regeneration and retete_list:
         existing_names = set(st.session_state.retete_respinse)
         overlap = sum(1 for r in retete_list if r.get("nume", "") in existing_names)
@@ -953,14 +1058,12 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
             fallback_data = json.loads(build_smart_fallback_plan(varianta_offset=st.session_state.varianta_meniu))
             retete_list = fallback_data.get("retete", retete_list)
 
-    # Reaplicăm rețetele pe care utilizatorul a bifat 🔒 Păstrează la regenerare
     for idx_lock, r_lock in locked_recipes:
         if idx_lock < len(retete_list):
             retete_list[idx_lock] = r_lock
 
     st.session_state.plan_retete = retete_list
 
-    # Construim lista de cumpărături sincronizată cu noile rețete
     lista_cump = data_parsed.get("lista_cumparaturi", [])
     if locked_recipes or not lista_cump:
         st.session_state.plan_df = rebuild_shopping_df_from_recipes(retete_list)
@@ -970,6 +1073,8 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
         if 'Cumpărat' not in df.columns:
             df.insert(0, 'Cumpărat', False)
         st.session_state.plan_df = df
+
+    save_device_state()
 
 # ==========================================
 # RECALCULARE ACTIVĂ MACRONUTRIENȚI & CARDURI
@@ -1018,6 +1123,7 @@ def recalculate_active_recipes_macros(produs_tinta, kcal_100, prot_100, carb_100
                 reteta["macro_per_portie"] = mc
         if mod:
             updated_count += 1
+    save_device_state()
     return updated_count
 
 def get_ics_content():
@@ -1095,14 +1201,15 @@ def render_recipe_card(reteta, index=None, allow_actions=True):
                         st.session_state.retetar_favorite.append(reteta)
                         st.session_state.db["retetar_favorite"] = st.session_state.retetar_favorite
                         save_local_db(st.session_state.db)
-                        st.toast("Rețetă salvată în Rețetar!", icon="✅")
+                        st.toast("Rețetă salvată permanent pe acest dispozitiv!", icon="✅")
             with c_b2:
                 if st.button("🔄 Schimbă doar această rețetă", type="secondary", key=f"swap_one_{index}", use_container_width=True):
                     replace_single_recipe(index)
-                    st.toast(f"Am înlocuit masa cu o altă rețetă și am actualizat lista!", icon="🔄")
+                    st.toast("Am înlocuit masa și am salvat noua listă!", icon="🔄")
                     st.rerun()
             with c_b3:
-                return st.checkbox("🔒 Păstrează la regenerare", key=f"lock_{index}")
+                default_lock = nume in st.session_state.get("mese_de_pastrat", [])
+                return st.checkbox("🔒 Păstrează la regenerare", value=default_lock, key=f"lock_{index}")
     return False
 
 # ==========================================
@@ -1130,9 +1237,9 @@ st.markdown(f"""
 # ==========================================
 st.markdown(
     '<div style="text-align:center; padding: 4px 0 8px 0;">'
-    '<div style="display:inline-block; background:rgba(9,206,230,0.12); border:1px solid rgba(9,206,230,0.35); border-radius:20px; padding:3px 12px; font-size:11px; color:#09CEE6; font-weight:700;">SMART NUTRITION & PRICE ENGINE</div>'
+    '<div style="display:inline-block; background:rgba(9,206,230,0.12); border:1px solid rgba(9,206,230,0.35); border-radius:20px; padding:3px 12px; font-size:11px; color:#09CEE6; font-weight:700;">SMART NUTRITION & PRICE ENGINE • AUTO-SAVED</div>'
     '<h2 style="margin:2px 0; font-size:25px; font-weight:800; color:#FFFFFF;">🥗 Asistent Nutriție Pro</h2>'
-    '<p style="color:#A0AEC0; font-size:13px; margin:0;">Mese delicioase, buget optimizat pe magazine & învățare din bonuri fiscale</p></div>',
+    '<p style="color:#A0AEC0; font-size:13px; margin:0;">Mese delicioase, buget optimizat pe magazine & salvare automată pe dispozitiv</p></div>',
     unsafe_allow_html=True
 )
 
@@ -1171,8 +1278,8 @@ if selected_tab == "Planificator":
             f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">🎯 ȚINTĂ ZILNICĂ / PERS.</div><div style="font-size:18px; font-weight:800; color:#F6AD55; margin-top:4px;">🔥 {kcal_zi_tinta} kcal</div><div style="font-size:11.5px; font-weight:700;"><span style="color:#FC8181;">{st.session_state.prot_tinta}g P</span> • <span style="color:#68D391;">{st.session_state.carb_tinta}g C</span> • <span style="color:#F6E05E;">{st.session_state.gras_tinta}g G</span></div></div>'
             f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">💰 BUGET & MAGAZINE</div><div style="font-size:17px; font-weight:800; color:#68D391; margin-top:4px;">{st.session_state.buget_min} - {st.session_state.buget_max} RON</div><div style="margin-top:6px;">{logos_bar}</div></div></div>'
             f'<div style="display:flex; justify-content:space-between; flex-wrap:wrap; font-size:11.5px; color:#A0AEC0; background:rgba(9,206,230,0.07); padding:7px 12px; border-radius:10px;">'
-            f'<span>👤 <b>Profil Activ:</b> {st.session_state.varsta} ani, {st.session_state.inaltime} cm, {st.session_state.greutate:.1f} kg ({st.session_state.obiectiv})</span>'
-            f'<span style="color:#09CEE6;">📦 {nr_preturi_db} prețuri & {nr_nutri_db} etichete ✓</span></div>',
+            f'<span>👤 <b>Profil Salvat:</b> {st.session_state.varsta} ani, {st.session_state.inaltime} cm, {st.session_state.greutate:.1f} kg ({st.session_state.obiectiv})</span>'
+            f'<span style="color:#09CEE6;">💾 {nr_preturi_db} prețuri • {nr_nutri_db} etichete • {len(st.session_state.retetar_favorite)} favorite ✓</span></div>',
             unsafe_allow_html=True
         )
         with st.expander("✏️ Ajustează Rapid Bugetul sau Magazinele"):
@@ -1196,19 +1303,15 @@ if selected_tab == "Planificator":
             st.session_state.fisiere_poze = st.file_uploader("Încarcă imagini din catalogul de reduceri:", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
     if st.button("🔥 GENEREAZĂ PLANUL ȘI CALCULEAZĂ PREȚURILE", type="primary", use_container_width=True):
-        with st.spinner(f"Se creează meniul optimizat pentru {kcal_zi_tinta} kcal/zi și se calculează prețurile..."):
+        with st.spinner(f"Se creează meniul optimizat pentru {kcal_zi_tinta} kcal/zi și se salvează pe dispozitiv..."):
             run_full_menu_generation(is_regeneration=False)
 
-    # ==========================================
-    # AFIȘARE PLAN + OPȚIUNE DE REGENERARE DACĂ NU ÎȚI PLAC REȚETELE
-    # ==========================================
     if st.session_state.plan_df is not None and st.session_state.plan_retete:
         st.write("---")
 
-        # PANOU DEDICAT: NU ÎMI PLAC MÂNCĂRURILE -> GENEREAZĂ ALTĂ LISTĂ
         with st.container(border=True):
             st.markdown("#### 🔄 Nu ești mulțumit de mâncărurile sau lista aleasă?")
-            st.caption("Poți genera imediat **altă listă de cumpărături și alte rețete complet diferite**! *(Sfat: dacă îți place o anumită rețetă de mai jos, bifează pe ea **🔒 Păstrează la regenerare** și doar restul meselor vor fi înlocuite)*.")
+            st.caption("Poți genera imediat **altă listă de cumpărături și alte rețete complet diferite**! *(Dacă îți place o anumită rețetă de mai jos, bifează pe ea **🔒 Păstrează la regenerare** și doar restul meselor vor fi înlocuite)*.")
             col_reg_txt, col_reg_btn = st.columns([1.5, 1.1], vertical_alignment="bottom")
             with col_reg_txt:
                 pref_noua = st.text_input(
@@ -1220,7 +1323,7 @@ if selected_tab == "Planificator":
                 if st.button("🔄 Nu îmi plac – Generează ALTĂ listă!", type="secondary", use_container_width=True):
                     with st.spinner("Se schimbă meniul și se recalculează noua listă de cumpărături..."):
                         run_full_menu_generation(is_regeneration=True, custom_hint=pref_noua)
-                    st.toast("Am generat un alt meniu și o nouă listă de cumpărături!", icon="🔄")
+                    st.toast("Am generat și salvat un alt meniu și o nouă listă!", icon="🔄")
                     st.rerun()
 
         df_cump = st.session_state.plan_df
@@ -1243,7 +1346,7 @@ if selected_tab == "Planificator":
         with col_dl1: st.download_button("💾 Descarcă Planul & Prețurile (.txt)", data=text_desc, file_name="Plan_Nutritie.txt", mime="text/plain", use_container_width=True)
         with col_dl2: st.download_button("📅 Exportă în Calendar (.ics)", data=get_ics_content(), file_name="Mese.ics", mime="text/calendar", use_container_width=True)
 
-        st.subheader("🍽️ Planul Tău Alimentar")
+        st.subheader("🍽️ Planul Tău Alimentar (Salvat Automat)")
         mese_bifate = []
         for i, reteta in enumerate(st.session_state.plan_retete):
             pastrat = render_recipe_card(reteta, index=i, allow_actions=True)
@@ -1292,6 +1395,7 @@ elif selected_tab == "Cumpărături":
         with st.container(border=True):
             df_edit = st.data_editor(st.session_state.plan_df, column_config={"Cumpărat": st.column_config.CheckboxColumn("În coș", default=False)}, hide_index=True, use_container_width=True)
             st.session_state.plan_df = df_edit
+            save_device_state()
             if "Preț Raft (RON)" in df_edit.columns:
                 total_cump = pd.to_numeric(df_edit["Preț Raft (RON)"], errors='coerce').sum()
                 bifat_count = int(df_edit["Cumpărat"].sum()) if "Cumpărat" in df_edit.columns else 0
@@ -1329,7 +1433,7 @@ elif selected_tab == "Cumpărături":
                     st.session_state.db["catalog_nutritie"][prod_final.lower()] = {"nume_afisat": prod_final, "kcal_100g": k1, "prot_100g": p1, "carb_100g": c1, "gras_100g": g1, "data": datetime.now().strftime("%Y-%m-%d")}
                     save_local_db(st.session_state.db)
                     nr_m = recalculate_active_recipes_macros(prod_final, k1, p1, c1, g1)
-                    st.success(f"✅ Etichetă salvată pentru **{prod_final}**! S-au recalculat {nr_m} rețete.")
+                    st.success(f"✅ Etichetă salvată permanent pentru **{prod_final}**! S-au recalculat {nr_m} rețete.")
                 except Exception as e:
                     st.error(f"Eroare citire etichetă: {e}")
 
@@ -1353,7 +1457,7 @@ elif selected_tab == "Cumpărături":
                         if np and pr > 0:
                             st.session_state.db["preturi_magazine"][mag_bon][np.lower()] = {"nume_afisat": np, "pret": pr, "ambalaj": str(it.get("cantitate_sau_ambalaj", "1 buc")), "data": datetime.now().strftime("%Y-%m-%d")}
                     save_local_db(st.session_state.db)
-                    st.success(f"🎉 S-au salvat {len(lb)} prețuri pentru {mag_bon}!")
+                    st.success(f"🎉 S-au salvat permanent {len(lb)} prețuri pentru {mag_bon} pe acest dispozitiv!")
                 except Exception as e:
                     st.error(f"Eroare procesare bon: {e}")
 
@@ -1402,7 +1506,7 @@ elif selected_tab == "Dietă & Mese":
 # TAB 4: PROFIL (CU PIE CHART INTEGRAT GARANTAT)
 # ==========================================
 elif selected_tab == "Profil":
-    st.subheader("👤 Date Biometrice & Obiectiv (Auto-Sincronizare Activă)")
+    st.subheader("👤 Date Biometrice & Obiectiv (Salvate Automat pe Dispozitiv)")
     with st.container(border=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -1431,7 +1535,7 @@ elif selected_tab == "Profil":
 
         if st.button("🚀 Aplică & Sincronizează Formula în Planificator", type="primary", use_container_width=True):
             recalc_from_biometrics()
-            st.toast(f"Țintă sincronizată: {st.session_state.kcal_tinta} kcal!", icon="✅")
+            st.toast(f"Țintă sincronizată și salvată: {st.session_state.kcal_tinta} kcal!", icon="✅")
 
     calc_info = calculate_biometric_targets()
     with st.container(border=True):
@@ -1474,7 +1578,7 @@ elif selected_tab == "Rețetar":
         "💰 Bază Prețuri Bonuri"
     ])
     with sub_fav:
-        st.subheader("📖 Rețetarul Meu (Salvate Permanent)")
+        st.subheader("📖 Rețetarul Meu (Salvate Permanent pe Dispozitiv)")
         if not st.session_state.retetar_favorite:
             st.info("Nu ai încă rețete salvate. Generează un plan în 'Planificator' și apasă pe '🖤 Salvează în Rețetar'!")
         else:
@@ -1502,7 +1606,7 @@ elif selected_tab == "Rețetar":
                         st.session_state.db["catalog_nutritie"][fn.lower()] = {"nume_afisat": fn, "kcal_100g": kv, "prot_100g": pv, "carb_100g": cv, "gras_100g": gv, "data": datetime.now().strftime("%Y-%m-%d")}
                         save_local_db(st.session_state.db)
                         recalculate_active_recipes_macros(fn, kv, pv, cv, gv)
-                        st.success(f"✅ Produsul **{fn}** a fost salvat!")
+                        st.success(f"✅ Produsul **{fn}** a fost salvat permanent!")
                     except Exception as e:
                         st.error(f"Eroare citire etichetă: {e}")
 
@@ -1517,25 +1621,44 @@ elif selected_tab == "Rețetar":
         else:
             st.info("Nu ai scanat încă niciun bon fiscal.")
 
+# Salvare automată la finalul fiecărei interacțiuni
+save_device_state()
+
 # ==========================================
-# INJECȚIE JAVASCRIPT PT. CULORI BUTOANE
+# SINCRONIZARE AUTOMATĂ BROWSER LOCALSTORAGE + CULORI BUTOANE
 # ==========================================
-components.html("""
+components.html(f"""
 <script>
-    const observer = new MutationObserver(function() {
-        const buttons = window.parent.document.querySelectorAll('button');
-        buttons.forEach(b => {
-            if(b.innerText.includes('250 ml')) {
-                b.style.backgroundColor = '#09CEE6'; b.style.color = '#0B132B'; b.style.border = 'none';
-            }
-            if(b.innerText.includes('Am stagnat')) {
-                b.style.backgroundColor = '#FFD54F'; b.style.color = '#0B132B'; b.style.border = 'none';
-            }
-            if(b.innerText.includes('❌') || b.innerText.includes('🗑️')) {
-                b.style.backgroundColor = '#E53E3E'; b.style.color = 'white'; b.style.border = 'none';
-            }
-        });
-    });
-    observer.observe(window.parent.document.body, {childList: true, subtree: true});
+    (function() {{
+        try {{
+            const currentUid = "{current_uid}";
+            const hasActivePlan = {"true" if (st.session_state.plan_retete or st.session_state.retetar_favorite) else "false"};
+            const savedBrowserUid = window.parent.localStorage.getItem("nutritie_pro_device_uid");
+
+            if (savedBrowserUid && savedBrowserUid !== currentUid && !hasActivePlan) {{
+                const url = new URL(window.parent.location.href);
+                url.searchParams.set("uid", savedBrowserUid);
+                window.parent.location.replace(url.toString());
+            }} else {{
+                window.parent.localStorage.setItem("nutritie_pro_device_uid", currentUid);
+            }}
+        }} catch (e) {{}}
+
+        const observer = new MutationObserver(function() {{
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach(b => {{
+                if(b.innerText.includes('250 ml')) {{
+                    b.style.backgroundColor = '#09CEE6'; b.style.color = '#0B132B'; b.style.border = 'none';
+                }}
+                if(b.innerText.includes('Am stagnat')) {{
+                    b.style.backgroundColor = '#FFD54F'; b.style.color = '#0B132B'; b.style.border = 'none';
+                }}
+                if(b.innerText.includes('❌') || b.innerText.includes('🗑️')) {{
+                    b.style.backgroundColor = '#E53E3E'; b.style.color = 'white'; b.style.border = 'none';
+                }}
+            }});
+        }});
+        observer.observe(window.parent.document.body, {{childList: true, subtree: true}});
+    }})();
 </script>
 """, height=0)
