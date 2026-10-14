@@ -1,36 +1,36 @@
-import sys
-import subprocess
-import importlib
-
-# ==========================================
-# AUTO-INSTALLER PENTRU STREAMLIT CLOUD
-# ==========================================
-try:
-    from google import genai
-    from streamlit_option_menu import option_menu
-    import plotly.express as px
-except ImportError:
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", "--upgrade",
-        "google-genai", "streamlit-option-menu", "plotly", "pandas", "Pillow", "requests"
-    ])
-    importlib.invalidate_caches()
-    if "google" in sys.modules:
-        del sys.modules["google"]
-    from google import genai
-    from streamlit_option_menu import option_menu
-    import plotly.express as px
-
 import streamlit as st
 import pandas as pd
 from PIL import Image
 import streamlit.components.v1 as components
+import requests
 import io
 import os
 import re
 import json
 import base64
 from datetime import datetime
+
+# ==========================================
+# IMPORTURI INTELIGENTE (COMPATIBIL PYTHON 3.14 CLOUD)
+# ==========================================
+try:
+    from google import genai
+    HAS_GENAI_SDK = True
+except ImportError:
+    genai = None
+    HAS_GENAI_SDK = False
+
+try:
+    from streamlit_option_menu import option_menu
+    HAS_OPTION_MENU = True
+except ImportError:
+    HAS_OPTION_MENU = False
+
+try:
+    import plotly.express as px
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
 # ==========================================
 # SETĂRI PAGINĂ & CACHING
@@ -42,9 +42,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+def get_api_key():
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY", "")
+
 @st.cache_resource
 def get_ai_client():
-    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    api_key = get_api_key()
+    if HAS_GENAI_SDK and api_key:
+        try:
+            return genai.Client(api_key=api_key)
+        except Exception:
+            return None
+    return None
 
 client = get_ai_client()
 
@@ -122,22 +134,20 @@ def render_store_logos_html(magazine_list, height_px=26):
     return "".join(imgs)
 
 # ==========================================
-# MOTOR AI DINAMIC (PRIORITIZARE 3.1 -> 3.0 -> 2.5 -> 2.0)
+# MOTOR AI HIBRID (SDK + CONEXIUNE DIRECTĂ HTTPS REST)
 # ==========================================
+class SimpleAIResponse:
+    def __init__(self, text):
+        self.text = text
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_available_models():
     preferred_order = [
-        "gemini-3.1-flash",
-        "gemini-3.1-pro",
-        "gemini-3.1-flash-lite",
-        "gemini-3.0-flash",
-        "gemini-3.0-pro",
         "gemini-2.5-flash",
         "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
         "gemini-2.0-flash-001",
-        "gemini-flash-latest"
+        "gemini-1.5-flash"
     ]
     exclude_keywords = [
         "embedding", "imagen", "veo", "tts", "audio",
@@ -145,20 +155,35 @@ def get_available_models():
     ]
     
     discovered = []
-    try:
-        for m in client.models.list():
-            raw_name = getattr(m, "name", "")
-            short_name = raw_name.replace("models/", "")
-            actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None)
-            if actions and "generateContent" not in actions:
-                continue
-            if "gemini" in short_name.lower() and not any(k in short_name.lower() for k in exclude_keywords):
-                discovered.append(short_name)
-    except Exception:
-        pass
+    api_key = get_api_key()
+
+    if client is not None:
+        try:
+            for m in client.models.list():
+                raw_name = getattr(m, "name", "")
+                short_name = raw_name.replace("models/", "")
+                actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None)
+                if actions and "generateContent" not in actions:
+                    continue
+                if "gemini" in short_name.lower() and not any(k in short_name.lower() for k in exclude_keywords):
+                    discovered.append(short_name)
+        except Exception:
+            pass
+    elif api_key:
+        try:
+            r = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}", timeout=10)
+            if r.status_code == 200:
+                for m in r.json().get("models", []):
+                    short_name = m.get("name", "").replace("models/", "")
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods and "gemini" in short_name.lower():
+                        if not any(k in short_name.lower() for k in exclude_keywords):
+                            discovered.append(short_name)
+        except Exception:
+            pass
 
     if not discovered:
-        return ["gemini-2.5-flash", "gemini-2.0-flash"]
+        return preferred_order
 
     sorted_models = []
     for m in discovered:
@@ -176,36 +201,74 @@ def get_available_models():
             
     return sorted_models
 
+def call_gemini_rest(api_key, model_name, contents, expect_json=False):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    parts = []
+    if not isinstance(contents, list):
+        contents = [contents]
+    for item in contents:
+        if isinstance(item, str):
+            parts.append({"text": item})
+        elif isinstance(item, Image.Image):
+            buf = io.BytesIO()
+            img_rgb = item.convert("RGB") if item.mode not in ("RGB", "L") else item
+            img_rgb.save(buf, format="JPEG", quality=85)
+            b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_data}})
+        elif isinstance(item, dict) and "data" in item and "mime_type" in item:
+            b64_data = base64.b64encode(item["data"]).decode("utf-8")
+            parts.append({"inline_data": {"mime_type": item["mime_type"], "data": b64_data}})
+
+    payload = {"contents": [{"parts": parts}]}
+    if expect_json:
+        payload["generationConfig"] = {"responseMimeType": "application/json"}
+
+    resp = requests.post(url, json=payload, timeout=90)
+    if resp.status_code != 200:
+        raise Exception(f"HTTP {resp.status_code}: {resp.text[:250]}")
+    data = resp.json()
+    candidates = data.get("candidates", [])
+    if candidates:
+        c_parts = candidates[0].get("content", {}).get("parts", [])
+        text_out = "".join(p.get("text", "") for p in c_parts)
+        if text_out:
+            return SimpleAIResponse(text_out)
+    raise Exception("Răspuns gol de la serverul AI.")
+
 def generate_with_ai(contents, expect_json=False):
+    api_key = get_api_key()
+    if not api_key:
+        return None, "Cheia GEMINI_API_KEY lipsește din Secrets!"
+
     candidate_models = get_available_models()
     errors = []
     
     for model_name in candidate_models:
         try:
-            if expect_json:
-                res = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config={"response_mime_type": "application/json"}
-                )
+            if client is not None:
+                if expect_json:
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config={"response_mime_type": "application/json"}
+                    )
+                else:
+                    res = client.models.generate_content(model=model_name, contents=contents)
             else:
-                res = client.models.generate_content(model=model_name, contents=contents)
+                res = call_gemini_rest(api_key, model_name, contents, expect_json=expect_json)
                 
             if res and res.text:
                 st.session_state.last_used_model = model_name
                 return res, None
         except Exception as e:
-            if expect_json:
-                try:
-                    res = client.models.generate_content(model=model_name, contents=contents)
-                    if res and res.text:
-                        st.session_state.last_used_model = model_name
-                        return res, None
-                except Exception as e2:
-                    errors.append(f"{model_name}: {str(e2)}")
-                    continue
-            errors.append(f"{model_name}: {str(e)}")
-            continue
+            try:
+                res = call_gemini_rest(api_key, model_name, contents, expect_json=False)
+                if res and res.text:
+                    st.session_state.last_used_model = model_name
+                    return res, None
+            except Exception as e2:
+                errors.append(f"{model_name}: {str(e2)}")
+                continue
             
     return None, "\n".join(errors[:3])
 
@@ -634,7 +697,7 @@ def render_recipe_card(reteta, index=None, allow_actions=True):
     return False
 
 # ==========================================
-# CULORI & CSS PREMIUM (OPTIMIZAT MOBILE & DESKTOP)
+# CULORI & CSS PREMIUM
 # ==========================================
 bg_color, card_bg, text_color, border_col = "#0B132B", "#1C2541", "#E2E8F0", "#3A506B"
 
@@ -730,26 +793,34 @@ st.markdown(header_top_html, unsafe_allow_html=True)
 col_menu, col_set = st.columns([9.1, 0.9], vertical_alignment="center")
 
 with col_menu:
-    selected_tab = option_menu(
-        menu_title=None,
-        options=["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"],
-        icons=["calendar2-week", "cart", "sliders", "person", "book"],
-        orientation="horizontal",
-        key="main_menu_nav",
-        styles={
-            "container": {
-                "padding": "5px", "background-color": card_bg, "border-radius": "30px", "border": f"1px solid {border_col}",
-                "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto", "width": "100%"
-            },
-            "icon": {"color": "inherit", "font-size": "13px"},
-            "nav-link": {
-                "font-size": "11px", "margin": "0px 2px", "color": text_color, "font-weight": "700",
-                "border-radius": "18px", "border": "1px solid rgba(9,206,230,0.35)", "background-color": "transparent",
-                "display": "flex", "flex-direction": "row", "align-items": "center", "justify-content": "center", "white-space": "nowrap", "gap": "4px"
-            },
-            "nav-link-selected": {"background-color": "#09CEE6", "color": "#0B132B", "font-weight": "800"},
-        }
-    )
+    if HAS_OPTION_MENU:
+        selected_tab = option_menu(
+            menu_title=None,
+            options=["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"],
+            icons=["calendar2-week", "cart", "sliders", "person", "book"],
+            orientation="horizontal",
+            key="main_menu_nav",
+            styles={
+                "container": {
+                    "padding": "5px", "background-color": card_bg, "border-radius": "30px", "border": f"1px solid {border_col}",
+                    "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto", "width": "100%"
+                },
+                "icon": {"color": "inherit", "font-size": "13px"},
+                "nav-link": {
+                    "font-size": "11px", "margin": "0px 2px", "color": text_color, "font-weight": "700",
+                    "border-radius": "18px", "border": "1px solid rgba(9,206,230,0.35)", "background-color": "transparent",
+                    "display": "flex", "flex-direction": "row", "align-items": "center", "justify-content": "center", "white-space": "nowrap", "gap": "4px"
+                },
+                "nav-link-selected": {"background-color": "#09CEE6", "color": "#0B132B", "font-weight": "800"},
+            }
+        )
+    else:
+        selected_tab = st.radio(
+            "Navigare",
+            ["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"],
+            horizontal=True,
+            label_visibility="collapsed"
+        )
 
 with col_set:
     if st.button("⚙️", key="gear_settings_btn", use_container_width=True):
@@ -1368,9 +1439,12 @@ elif selected_tab == "Profil":
             "Grame": [st.session_state.prot_tinta, st.session_state.carb_tinta, st.session_state.gras_tinta],
             "Calorii": [st.session_state.prot_tinta * 4, st.session_state.carb_tinta * 4, st.session_state.gras_tinta * 9]
         })
-        fig = px.pie(df_macro, values='Calorii', names='Nutrient', hover_data=['Grame'], hole=0.45, color='Nutrient', color_discrete_map={"Proteine": "#FC8181", "Carbohidrați": "#68D391", "Grăsimi": "#F6E05E"})
-        fig.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color=text_color))
-        st.plotly_chart(fig, use_container_width=True)
+        if HAS_PLOTLY:
+            fig = px.pie(df_macro, values='Calorii', names='Nutrient', hover_data=['Grame'], hole=0.45, color='Nutrient', color_discrete_map={"Proteine": "#FC8181", "Carbohidrați": "#68D391", "Grăsimi": "#F6E05E"})
+            fig.update_layout(height=280, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color=text_color))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(df_macro, use_container_width=True, hide_index=True)
 
 # ==========================================
 # TAB 5: REȚETAR & CATALOG ETICHETE NUTRIȚIONALE / PREȚURI
