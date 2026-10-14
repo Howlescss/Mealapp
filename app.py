@@ -7,6 +7,7 @@ import io
 import os
 import re
 import json
+import math
 import base64
 from datetime import datetime
 
@@ -49,8 +50,7 @@ def load_local_db():
         "preturi_magazine": {},
         "catalog_nutritie": {},
         "retetar_favorite": [],
-        "profil_utilizator": {},
-        "custom_api_key": ""
+        "profil_utilizator": {}
     }
     if os.path.exists(DB_FILE):
         try:
@@ -72,14 +72,138 @@ def save_local_db(db_data):
         pass
 
 # ==========================================
+# LOGO-URI MAGAZINE (CĂUTARE INTELIGENTĂ + SVG INTEGRAT)
+# ==========================================
+STORE_SVGS = {
+    "Lidl": '<svg xmlns="http://www.w3.org/2000/svg" width="76" height="28" viewBox="0 0 152 56"><rect width="152" height="56" rx="10" fill="#0050AA"/><circle cx="76" cy="28" r="23" fill="#FFF000" stroke="#E60A14" stroke-width="4"/><text x="76" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="900" fill="#0050AA" text-anchor="middle">LIDL</text></svg>',
+    "Kaufland": '<svg xmlns="http://www.w3.org/2000/svg" width="105" height="28" viewBox="0 0 210 56"><rect width="210" height="56" rx="10" fill="#FFFFFF" stroke="#E10915" stroke-width="4"/><rect x="10" y="10" width="36" height="36" rx="4" fill="#E10915"/><text x="28" y="36" font-family="Arial,sans-serif" font-size="24" font-weight="900" fill="#FFFFFF" text-anchor="middle">K</text><text x="126" y="35" font-family="Arial,sans-serif" font-size="21" font-weight="800" fill="#E10915" text-anchor="middle">Kaufland</text></svg>',
+    "Carrefour": '<svg xmlns="http://www.w3.org/2000/svg" width="105" height="28" viewBox="0 0 210 56"><rect width="210" height="56" rx="10" fill="#004E9E"/><circle cx="28" cy="28" r="14" fill="#E3001B"/><text x="122" y="35" font-family="Arial,sans-serif" font-size="21" font-weight="800" fill="#FFFFFF" text-anchor="middle">Carrefour</text></svg>',
+    "Mega Image": '<svg xmlns="http://www.w3.org/2000/svg" width="115" height="28" viewBox="0 0 230 56"><rect width="230" height="56" rx="10" fill="#8B1D41"/><text x="115" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#FFFFFF" text-anchor="middle">MEGA IMAGE</text></svg>',
+    "Auchan": '<svg xmlns="http://www.w3.org/2000/svg" width="92" height="28" viewBox="0 0 184 56"><rect width="184" height="56" rx="10" fill="#E0001A"/><circle cx="28" cy="28" r="13" fill="#009640" stroke="#FFFFFF" stroke-width="2"/><text x="110" y="35" font-family="Arial,sans-serif" font-size="21" font-weight="800" fill="#FFFFFF" text-anchor="middle">Auchan</text></svg>',
+    "Penny": '<svg xmlns="http://www.w3.org/2000/svg" width="86" height="28" viewBox="0 0 172 56"><rect width="172" height="56" rx="10" fill="#CD1719"/><text x="86" y="36" font-family="Arial,sans-serif" font-size="22" font-weight="900" fill="#FFCC00" text-anchor="middle">PENNY.</text></svg>',
+    "LaDoiPasi": '<svg xmlns="http://www.w3.org/2000/svg" width="102" height="28" viewBox="0 0 204 56"><rect width="204" height="56" rx="10" fill="#F37021"/><text x="102" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="900" fill="#FFFFFF" text-anchor="middle">LaDoiPași</text></svg>'
+}
+
+def get_store_logo_b64(magazin):
+    mag_clean = re.sub(r"[^a-z0-9]", "", magazin.lower())
+    for folder in ["logos", "Logos", "."]:
+        if os.path.exists(folder) and os.path.isdir(folder):
+            try:
+                for fname in os.listdir(folder):
+                    name_part, ext_part = os.path.splitext(fname)
+                    ext_low = ext_part.lower().lstrip(".")
+                    if ext_low in ["png", "jpg", "jpeg", "webp"]:
+                        if re.sub(r"[^a-z0-9]", "", name_part.lower()) == mag_clean:
+                            fpath = os.path.join(folder, fname)
+                            with open(fpath, "rb") as f:
+                                b64 = base64.b64encode(f.read()).decode("utf-8")
+                                mime = "image/png" if ext_low == "png" else ("image/webp" if ext_low == "webp" else "image/jpeg")
+                                return f"data:{mime};base64,{b64}"
+            except Exception:
+                pass
+
+    svg_str = STORE_SVGS.get(
+        magazin,
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="85" height="28" viewBox="0 0 170 56"><rect width="170" height="56" rx="10" fill="#1C2541" stroke="#09CEE6" stroke-width="2"/><text x="85" y="35" font-family="Arial,sans-serif" font-size="18" font-weight="bold" fill="#09CEE6" text-anchor="middle">{magazin}</text></svg>'
+    )
+    b64_svg = base64.b64encode(svg_str.encode("utf-8")).decode("utf-8")
+    return f"data:image/svg+xml;base64,{b64_svg}"
+
+def render_store_logos_html(magazine_list, height_px=26):
+    if not magazine_list:
+        return ""
+    imgs = []
+    for mag in magazine_list:
+        src = get_store_logo_b64(mag)
+        imgs.append(
+            f'<img src="{src}" alt="{mag}" style="height:{height_px}px; width:auto; border-radius:6px; margin-right:6px; vertical-align:middle; display:inline-block; box-shadow:0 2px 6px rgba(0,0,0,0.35);" title="{mag}">'
+        )
+    return "".join(imgs)
+
+# ==========================================
+# GRAFIC PIE CHART / DONUT GARANTAT (PLOTLY + SVG FALLBACK)
+# ==========================================
+def render_macros_pie_chart(prot_g, carb_g, gras_g):
+    p_cal = max(0, int(prot_g) * 4)
+    c_cal = max(0, int(carb_g) * 4)
+    g_cal = max(0, int(gras_g) * 9)
+    total_cal = max(1, p_cal + c_cal + g_cal)
+
+    p_pct = round((p_cal / total_cal) * 100)
+    c_pct = round((c_cal / total_cal) * 100)
+    g_pct = max(0, 100 - p_pct - c_pct)
+
+    if HAS_PLOTLY:
+        df_macro = pd.DataFrame({
+            "Nutrient": ["Proteine", "Carbohidrați", "Grăsimi"],
+            "Grame": [prot_g, carb_g, gras_g],
+            "Calorii": [p_cal, c_cal, g_cal]
+        })
+        fig = px.pie(
+            df_macro,
+            values='Calorii',
+            names='Nutrient',
+            hover_data=['Grame'],
+            hole=0.48,
+            color='Nutrient',
+            color_discrete_map={"Proteine": "#FC8181", "Carbohidrați": "#68D391", "Grăsimi": "#F6E05E"}
+        )
+        fig.update_layout(
+            height=280,
+            margin=dict(t=10, b=10, l=10, r=10),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color="#E2E8F0")
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        r = 68
+        circ = 2 * math.pi * r
+        len_p = (p_cal / total_cal) * circ
+        len_c = (c_cal / total_cal) * circ
+        len_g = (g_cal / total_cal) * circ
+
+        off_p = 0
+        off_c = -len_p
+        off_g = -(len_p + len_c)
+
+        donut_html = (
+            f'<div style="display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:28px; padding:16px; background:#0B132B; border-radius:16px; border:1px solid #2D3748; margin-top:10px;">'
+            f'<div style="position:relative; width:180px; height:180px; display:flex; align-items:center; justify-content:center;">'
+            f'<svg width="180" height="180" viewBox="0 0 180 180" style="transform:rotate(-90deg);">'
+            f'<circle cx="90" cy="90" r="{r}" fill="transparent" stroke="#1C2541" stroke-width="24"/>'
+            f'<circle cx="90" cy="90" r="{r}" fill="transparent" stroke="#FC8181" stroke-width="24" stroke-dasharray="{len_p:.2f} {circ:.2f}" stroke-dashoffset="{off_p:.2f}"/>'
+            f'<circle cx="90" cy="90" r="{r}" fill="transparent" stroke="#68D391" stroke-width="24" stroke-dasharray="{len_c:.2f} {circ:.2f}" stroke-dashoffset="{off_c:.2f}"/>'
+            f'<circle cx="90" cy="90" r="{r}" fill="transparent" stroke="#F6E05E" stroke-width="24" stroke-dasharray="{len_g:.2f} {circ:.2f}" stroke-dashoffset="{off_g:.2f}"/>'
+            f'</svg>'
+            f'<div style="position:absolute; text-align:center;">'
+            f'<div style="font-size:20px; font-weight:900; color:#FFFFFF;">{total_cal}</div>'
+            f'<div style="font-size:11px; color:#A0AEC0; font-weight:700;">KCAL / ZI</div>'
+            f'</div>'
+            f'</div>'
+            f'<div style="display:flex; flex-direction:column; gap:10px; min-width:210px;">'
+            f'<div style="display:flex; justify-content:space-between; align-items:center; background:#1C2541; padding:8px 14px; border-radius:10px; border-left:4px solid #FC8181;">'
+            f'<span style="color:#E2E8F0; font-weight:700; font-size:13px;">🥩 Proteine ({p_pct}%)</span>'
+            f'<span style="color:#FC8181; font-weight:800; font-size:13px;">{prot_g}g • {p_cal} kcal</span>'
+            f'</div>'
+            f'<div style="display:flex; justify-content:space-between; align-items:center; background:#1C2541; padding:8px 14px; border-radius:10px; border-left:4px solid #68D391;">'
+            f'<span style="color:#E2E8F0; font-weight:700; font-size:13px;">🌾 Carbohidrați ({c_pct}%)</span>'
+            f'<span style="color:#68D391; font-weight:800; font-size:13px;">{carb_g}g • {c_cal} kcal</span>'
+            f'</div>'
+            f'<div style="display:flex; justify-content:space-between; align-items:center; background:#1C2541; padding:8px 14px; border-radius:10px; border-left:4px solid #F6E05E;">'
+            f'<span style="color:#E2E8F0; font-weight:700; font-size:13px;">🥑 Grăsimi ({g_pct}%)</span>'
+            f'<span style="color:#F6E05E; font-weight:800; font-size:13px;">{gras_g}g • {g_cal} kcal</span>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
+        )
+        st.markdown(donut_html, unsafe_allow_html=True)
+
+# ==========================================
 # GESTIONARE CHEI API & MULTI-SERVER AI ENGINE
 # ==========================================
 def get_api_keys():
     keys = []
-    if "db" in st.session_state and st.session_state.db.get("custom_api_key"):
-        k_custom = str(st.session_state.db["custom_api_key"]).strip().strip('"').strip("'")
-        if k_custom:
-            keys.append(k_custom)
     try:
         for k_name in ["GEMINI_API_KEY", "VERTEX_API_KEY", "GOOGLE_API_KEY"]:
             if k_name in st.secrets:
@@ -132,7 +256,6 @@ def call_google_multi_endpoint(api_key, model_name, contents, expect_json=False)
         payload_std["generationConfig"] = {"responseMimeType": "application/json"}
         payload_vtx["generationConfig"] = {"responseMimeType": "application/json"}
 
-    # Dacă cheia începe cu AQ., prioritizăm Vertex AI Express
     if api_key.startswith("AQ."):
         endpoints = [
             (f"https://aiplatform.googleapis.com/v1/publishers/google/models/{model_name}:generateContent", payload_vtx),
@@ -167,7 +290,6 @@ def call_google_multi_endpoint(api_key, model_name, contents, expect_json=False)
     return None, last_err
 
 def call_free_cloud_relay(contents, expect_json=False):
-    """Releu AI gratuit (fără cheie Google) folosit automat dacă cheia Google are restricție 403/401."""
     user_content = []
     if not isinstance(contents, list):
         contents = [contents]
@@ -210,7 +332,6 @@ def call_free_cloud_relay(contents, expect_json=False):
     return None, "Releu indisponibil"
 
 def build_smart_fallback_plan():
-    """Generator matematic local de siguranță dacă toate serverele externe sunt blocate."""
     zile = st.session_state.zile
     pers = st.session_state.persoane
     batch = st.session_state.batch_cooking
@@ -221,7 +342,6 @@ def build_smart_fallback_plan():
     g_t = st.session_state.gras_tinta
     mult = (zile * pers) if batch else pers
 
-    # Scalare matematică pe ținta utilizatorului
     f_md, f_pr, f_ci = 0.28, 0.42, 0.30
     lista_cump = [
         {"produs": "Piept de pui dezosat", "magazin": mag, "categorie": "Carne & Pește", "cantitate_necesara": f"{int(220*zile*pers)}g", "ambalaj_raft": "Caserolă 1kg", "pret_raft_ron": round(28.90 * max(1, (220*zile*pers)/1000), 2), "kcal_100g": 110},
@@ -308,28 +428,22 @@ def generate_with_ai(contents, expect_json=False, is_meal_plan=False):
     api_keys = get_api_keys()
     errors = []
 
-    # 1 & 2: Încearcă toate cheile pe Google AI Studio + Vertex AI Express
     for key in api_keys:
         for model_name in candidate_models:
             res, err = call_google_multi_endpoint(key, model_name, contents, expect_json=expect_json)
             if res and res.text:
-                st.session_state.last_used_model = f"{model_name} (Google API)"
                 return res, None
             if err:
                 errors.append(f"{model_name}: {err}")
 
-    # 3: Fallback automat pe Releul AI Cloud Gratuit (dacă cheia Google dă 403/401)
-    res_relay, model_relay = call_free_cloud_relay(contents, expect_json=expect_json)
+    res_relay, _ = call_free_cloud_relay(contents, expect_json=expect_json)
     if res_relay and res_relay.text:
-        st.session_state.last_used_model = model_relay
         return res_relay, None
 
-    # 4: Fallback Matematic Local pentru Planul Alimentar
     if is_meal_plan:
-        st.session_state.last_used_model = "Smart-Local-Engine"
         return SimpleAIResponse(build_smart_fallback_plan()), None
 
-    return None, " | ".join(errors[:2]) if errors else "Verifică conexiunea sau cheia API din ⚙️ Setări."
+    return None, " | ".join(errors[:2]) if errors else "Serviciul AI este momentan ocupat."
 
 def parse_ai_json(raw_text):
     txt = raw_text.strip()
@@ -341,32 +455,6 @@ def parse_ai_json(raw_text):
     if start != -1 and end != -1 and end > start:
         txt = txt[start:end+1]
     return json.loads(txt)
-
-# ==========================================
-# LOGO-URI MAGAZINE (SVG INTEGRAT)
-# ==========================================
-STORE_SVGS = {
-    "Lidl": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="70" height="28" viewBox="0 0 140 56"><rect width="140" height="56" rx="10" fill="#0050AA"/><circle cx="70" cy="28" r="22" fill="#FFF000" stroke="#E60A14" stroke-width="3"/><text x="70" y="34" font-family="Arial,sans-serif" font-size="18" font-weight="900" fill="#0050AA" text-anchor="middle">LIDL</text></svg>',
-    "Kaufland": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="95" height="28" viewBox="0 0 190 56"><rect width="190" height="56" rx="10" fill="#FFFFFF" stroke="#E10915" stroke-width="4"/><rect x="10" y="10" width="36" height="36" rx="4" fill="#E10915"/><text x="28" y="36" font-family="Arial,sans-serif" font-size="24" font-weight="900" fill="#FFFFFF" text-anchor="middle">K</text><text x="118" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#E10915" text-anchor="middle">Kaufland</text></svg>',
-    "Carrefour": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="95" height="28" viewBox="0 0 190 56"><rect width="190" height="56" rx="10" fill="#004E9E"/><circle cx="28" cy="28" r="14" fill="#E3001B"/><text x="112" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="800" fill="#FFFFFF" text-anchor="middle">Carrefour</text></svg>',
-    "Mega Image": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="105" height="28" viewBox="0 0 210 56"><rect width="210" height="56" rx="10" fill="#8B1D41"/><text x="105" y="35" font-family="Arial,sans-serif" font-size="19" font-weight="800" fill="#FFFFFF" text-anchor="middle">MEGA IMAGE</text></svg>',
-    "Auchan": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="85" height="28" viewBox="0 0 170 56"><rect width="170" height="56" rx="10" fill="#E0001A"/><circle cx="28" cy="28" r="13" fill="#009640" stroke="#FFFFFF" stroke-width="2"/><text x="104" y="35" font-family="Arial,sans-serif" font-size="21" font-weight="800" fill="#FFFFFF" text-anchor="middle">Auchan</text></svg>',
-    "Penny": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="80" height="28" viewBox="0 0 160 56"><rect width="160" height="56" rx="10" fill="#CD1719"/><text x="80" y="36" font-family="Arial,sans-serif" font-size="22" font-weight="900" fill="#FFCC00" text-anchor="middle">PENNY.</text></svg>',
-    "LaDoiPasi": '<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="95" height="28" viewBox="0 0 190 56"><rect width="190" height="56" rx="10" fill="#F37021"/><text x="95" y="35" font-family="Arial,sans-serif" font-size="20" font-weight="900" fill="#FFFFFF" text-anchor="middle">LaDoiPași</text></svg>'
-}
-
-def get_store_logo_b64(magazin):
-    svg_str = STORE_SVGS.get(
-        magazin,
-        f'<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="80" height="28" viewBox="0 0 160 56"><rect width="160" height="56" rx="10" fill="#1C2541" stroke="#09CEE6" stroke-width="2"/><text x="80" y="35" font-family="Arial" font-size="18" font-weight="bold" fill="#09CEE6" text-anchor="middle">{magazin}</text></svg>'
-    )
-    b64_svg = base64.b64encode(svg_str.encode("utf-8")).decode("utf-8")
-    return f"data:image/svg+xml;base64,{b64_svg}"
-
-def render_store_logos_html(magazine_list, height_px=26):
-    if not magazine_list:
-        return ""
-    return "".join([f'<img src="{get_store_logo_b64(m)}" style="height:{height_px}px; border-radius:6px; margin-right:6px; vertical-align:middle;" title="{m}">' for m in magazine_list])
 
 # ==========================================
 # DATE OPȚIUNI & MOTOR AUTO-SYNC PROFIL
@@ -464,8 +552,6 @@ if 'init_done' not in st.session_state:
     saved_prof = db_loaded.get("profil_utilizator", {})
     st.session_state.update({
         'db': db_loaded,
-        'mod_simplificat': False,
-        'last_used_model': 'Multi-Engine Ready',
         'sex': saved_prof.get('sex', "Masculin"),
         'varsta': int(saved_prof.get('varsta', 24)),
         'inaltime': int(saved_prof.get('inaltime', 175)),
@@ -619,7 +705,7 @@ def render_recipe_card(reteta, index=None, allow_actions=True):
                 ver = " 🏷️" if ing.get("eticheta_verificata") else ""
                 ing_rows.append(
                     f'<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px dashed #1C2541; font-size:13px;">'
-                    f'<div style="display:flex; align-items:center; gap:4px;"><img src="{logo_src}" style="height:15px; border-radius:3px;">'
+                    f'<div style="display:flex; align-items:center; gap:5px;"><img src="{logo_src}" style="height:16px; width:auto; border-radius:3px;">'
                     f'<span style="color:#E2E8F0; font-weight:600;">{ing.get("produs", "")}{ver}</span>'
                     f'<span style="color:#09CEE6; font-size:12px;">({ing.get("cantitate", "")})</span></div>'
                     f'<div style="color:#68D391; font-weight:700;">{float(ing.get("pret_estimat_ron", 0.0)):.2f} lei</div></div>'
@@ -666,62 +752,40 @@ st.markdown(f"""
     button[kind="secondary"] {{ border-radius: 14px !important; font-weight: 700 !important; border: 1px solid #3A506B !important; }}
     .stTextInput>div>div>input, .stNumberInput>div>div>input, .stSelectbox>div>div>div, .stMultiSelect>div>div>div, .stTextArea>div>div>textarea {{ background-color: {bg_color} !important; color: {text_color} !important; border-radius: 12px !important; border: 1px solid {border_col} !important; }}
     span[data-baseweb="tag"] {{ background-color: #09CEE6 !important; color: #0B132B !important; font-weight: 700 !important; border-radius: 10px !important; }}
-    button[key="gear_settings_btn"] {{ background-color: transparent !important; border: none !important; font-size: 26px !important; padding: 0 !important; }}
     div[data-testid="stTabs"] button[role="tab"] {{ background-color: {bg_color} !important; border-radius: 12px !important; padding: 8px 14px !important; border: 1px solid {border_col} !important; font-weight: 600 !important; }}
     div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{ background-color: #09CEE6 !important; color: #0B132B !important; font-weight: 800 !important; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# POP-UP SETĂRI (CU CONFIGURARE CHEIE LIVE)
-# ==========================================
-@st.dialog("⚙️ Setările Aplicației & Cheie API")
-def settings_modal():
-    st.checkbox("Mod Simplificat (Ascunde setările avansate din Dietă & Mese)", value=st.session_state.mod_simplificat, key=init_ui('mod_simplificat'), on_change=sync, args=('mod_simplificat',))
-    st.write("---")
-    st.markdown("#### 🔑 Configurare Rapidă Cheie API (Opțional)")
-    st.caption("Dacă cheia din Streamlit Secrets are restricții 403 în Google Cloud, poți lipi aici fie cheia `AQ...` (Vertex AI), fie o cheie nouă `AIzaSy...` fără restricții:")
-    new_k = st.text_input("Cheie API (AIzaSy... sau AQ...):", value=st.session_state.db.get("custom_api_key", ""), type="password")
-    if st.button("💾 Salvează Cheia în Aplicație", type="primary", use_container_width=True):
-        st.session_state.db["custom_api_key"] = new_k.strip()
-        save_local_db(st.session_state.db)
-        st.success("Cheia a fost salvată! Aplicația folosește acum Multi-Server + Releu AI automat.")
-    st.write("---")
-    st.caption(f"🤖 Ultimul motor AI folosit: **`{st.session_state.last_used_model}`**")
-
-# ==========================================
-# HEADER & NAVBAR
+# HEADER & NAVBAR (FĂRĂ BUTON DE SETĂRI)
 # ==========================================
 st.markdown(
-    '<div style="text-align:center; padding: 4px 0;">'
+    '<div style="text-align:center; padding: 4px 0 8px 0;">'
     '<div style="display:inline-block; background:rgba(9,206,230,0.12); border:1px solid rgba(9,206,230,0.35); border-radius:20px; padding:3px 12px; font-size:11px; color:#09CEE6; font-weight:700;">SMART NUTRITION & PRICE ENGINE</div>'
     '<h2 style="margin:2px 0; font-size:25px; font-weight:800; color:#FFFFFF;">🥗 Asistent Nutriție Pro</h2>'
     '<p style="color:#A0AEC0; font-size:13px; margin:0;">Mese delicioase, buget optimizat pe magazine & învățare din bonuri fiscale</p></div>',
     unsafe_allow_html=True
 )
 
-col_menu, col_set = st.columns([9.1, 0.9], vertical_alignment="center")
-with col_menu:
-    if HAS_OPTION_MENU:
-        selected_tab = option_menu(
-            menu_title=None,
-            options=["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"],
-            icons=["calendar2-week", "cart", "sliders", "person", "book"],
-            orientation="horizontal",
-            key="main_menu_nav",
-            styles={
-                "container": {"padding": "5px", "background-color": card_bg, "border-radius": "30px", "border": f"1px solid {border_col}", "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto"},
-                "icon": {"color": "inherit", "font-size": "13px"},
-                "nav-link": {"font-size": "11px", "margin": "0px 2px", "color": text_color, "font-weight": "700", "border-radius": "18px", "border": "1px solid rgba(9,206,230,0.35)", "white-space": "nowrap"},
-                "nav-link-selected": {"background-color": "#09CEE6", "color": "#0B132B", "font-weight": "800"},
-            }
-        )
-    else:
-        selected_tab = st.radio("Navigare", ["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"], horizontal=True, label_visibility="collapsed")
+if HAS_OPTION_MENU:
+    selected_tab = option_menu(
+        menu_title=None,
+        options=["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"],
+        icons=["calendar2-week", "cart", "sliders", "person", "book"],
+        orientation="horizontal",
+        key="main_menu_nav",
+        styles={
+            "container": {"padding": "5px", "background-color": card_bg, "border-radius": "30px", "border": f"1px solid {border_col}", "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto"},
+            "icon": {"color": "inherit", "font-size": "13px"},
+            "nav-link": {"font-size": "11px", "margin": "0px 2px", "color": text_color, "font-weight": "700", "border-radius": "18px", "border": "1px solid rgba(9,206,230,0.35)", "white-space": "nowrap"},
+            "nav-link-selected": {"background-color": "#09CEE6", "color": "#0B132B", "font-weight": "800"},
+        }
+    )
+else:
+    selected_tab = st.radio("Navigare", ["Planificator", "Cumpărături", "Dietă & Mese", "Profil", "Rețetar"], horizontal=True, label_visibility="collapsed")
 
-with col_set:
-    if st.button("⚙️", key="gear_settings_btn", use_container_width=True):
-        settings_modal()
+st.write("")
 
 # ==========================================
 # TAB 1: PLANIFICATOR
@@ -748,6 +812,20 @@ if selected_tab == "Planificator":
             with cb1: st.number_input("Buget Minim (RON)", min_value=0, step=10, key=init_ui('buget_min'), on_change=sync_budget_from_inputs)
             with cb2: st.number_input("Buget Maxim (RON)", min_value=0, step=10, key=init_ui('buget_max'), on_change=sync_budget_from_inputs)
             st.multiselect("Magazine active:", magazine_disponibile, key=init_ui('magazine_selectate'), on_change=sync, args=('magazine_selectate',))
+
+    if st.session_state.retetar_favorite:
+        with st.container(border=True):
+            st.multiselect("🖤 Include obligatoriu rețete din Rețetarul tău:", [r.get('nume', 'Rețetă') for r in st.session_state.retetar_favorite], key=init_ui('include_favorites'), on_change=sync, args=('include_favorites',))
+
+    with st.container(border=True):
+        st.markdown("#### 🛍️ Optimizare Oferte & Cataloage")
+        st.session_state.tip_oferta = st.radio(
+            "Sursă prețuri:",
+            ["Estimare prețuri actuale + Baza ta de bonuri", "Încarcă poze cu revista de oferte"],
+            horizontal=True
+        )
+        if st.session_state.tip_oferta == "Încarcă poze cu revista de oferte":
+            st.session_state.fisiere_poze = st.file_uploader("Încarcă imagini din catalogul de reduceri:", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
     if st.button("🔥 GENEREAZĂ PLANUL ȘI CALCULEAZĂ PREȚURILE", type="primary", use_container_width=True):
         with st.spinner(f"Se creează meniul optimizat pentru {kcal_zi_tinta} kcal/zi și se calculează prețurile..."):
@@ -778,7 +856,12 @@ if selected_tab == "Planificator":
               "retete": [{{"perioada": "Ziua 1", "tip_masa": "Prânz", "nume": "Pui cu orez basmati", "timp_preparare": "25 min", "numar_portii": {st.session_state.persoane}, "cost_total_reteta_ron": 14.50, "cost_per_portie_ron": 14.50, "macro_per_portie": {{"kcal": 620, "proteine_g": 52, "carbo_g": 68, "grasimi_g": 12}}, "aparate": ["Aragaz (Plită)"], "ingrediente": [{{"produs": "Piept de pui", "cantitate": "220g", "gramaj_g": 220, "magazin": "Lidl", "pret_estimat_ron": 8.50, "kcal_100g": 110, "prot_100g": 23.0, "carb_100g": 0.0, "gras_100g": 1.5}}], "pasi_preparare": ["Pasul 1", "Pasul 2"], "sfat_depozitare": "La frigider 3 zile."}}]
             }}
             """
-            rezultat_ai, _ = generate_with_ai([prompt], expect_json=True, is_meal_plan=True)
+            continut_ai = [prompt]
+            if st.session_state.tip_oferta == "Încarcă poze cu revista de oferte" and st.session_state.fisiere_poze:
+                for f in st.session_state.fisiere_poze:
+                    continut_ai.append(Image.open(f))
+
+            rezultat_ai, _ = generate_with_ai(continut_ai, expect_json=True, is_meal_plan=True)
             try:
                 data_parsed = parse_ai_json(rezultat_ai.text)
             except Exception:
@@ -824,15 +907,26 @@ if selected_tab == "Planificator":
     st.write("---")
     st.subheader("🧊 Frigiderul Magic (Snap & Cook)")
     with st.container(border=True):
-        cu_ce_gatesc = st.text_input("Scrie ingredientele pe care le ai în frigider (ex: ouă, brânză, roșii, tortilla):", key="frigider_text")
+        t1, t2, t3 = st.tabs(["📝 Scrie Ingredientele", "🎙️ Comandă Vocală", "📸 Pozează Frigiderul"])
+        cu_ce_gatesc, audio_frigider, poza_frigider = None, None, None
+        with t1: cu_ce_gatesc = st.text_input("Ex: ouă, brânză, roșii, tortilla", key="frigider_text")
+        with t2: audio_frigider = st.audio_input("Dictează ingredientele pe care le ai:")
+        with t3: poza_frigider = st.file_uploader("Încarcă sau fă o poză la ingrediente", type=["png", "jpg", "jpeg"], key="snap_cook_up")
+
         if st.button("✨ Găsește-mi o rețetă rapidă", use_container_width=True):
-            if cu_ce_gatesc:
+            if cu_ce_gatesc or poza_frigider or audio_frigider:
                 with st.spinner("Se creează rețeta..."):
-                    res_snap, _ = generate_with_ai([f"Creează o rețetă rapidă în limba română cu: {cu_ce_gatesc}, incluzând calorii și mod de preparare."], expect_json=False)
+                    continut_snap = [f"Creează o rețetă structurată în limba română pentru {st.session_state.persoane} persoane, cu calorii și preț estimat."]
+                    if cu_ce_gatesc: continut_snap.append(f"Ingrediente: {cu_ce_gatesc}")
+                    if poza_frigider: continut_snap.append(Image.open(poza_frigider))
+                    if audio_frigider: continut_snap.append({"mime_type": "audio/wav", "data": audio_frigider.getvalue()})
+                    res_snap, _ = generate_with_ai(continut_snap, expect_json=False)
                     if res_snap:
                         st.markdown(res_snap.text)
                     else:
-                        st.info(f"**Tigaie rapidă cu {cu_ce_gatesc}**: Rumenește ingredientele 8-10 minute în tigaia antiaderentă cu condimente și servește cald (~450 kcal / porție).")
+                        st.info(f"**Tigaie rapidă cu {cu_ce_gatesc or 'ingredientele tale'}**: Gătește ingredientele 8-10 minute în tigaia antiaderentă cu condimente și servește cald (~450 kcal / porție).")
+            else:
+                st.warning("Introdu ingrediente (text, poză sau voce)!")
 
 # ==========================================
 # TAB 2: CUMPĂRĂTURI
@@ -844,7 +938,7 @@ elif selected_tab == "Cumpărături":
         with col_c1: st.selectbox("Ziua de cumpărături:", zile_saptamana, key=init_ui('zi_cumparaturi'), on_change=sync, args=('zi_cumparaturi',))
         with col_c2: st.multiselect("Selectează magazinele:", magazine_disponibile, key=init_ui('magazine_selectate'), on_change=sync, args=('magazine_selectate',))
         st.markdown(f'<div style="margin:6px 0 12px 0;">{render_store_logos_html(st.session_state.magazine_selectate, height_px=28)}</div>', unsafe_allow_html=True)
-        st.text_area("🥫 Cămara Virtuală (Produse deja acasă):", key=init_ui('camara'), on_change=sync, args=('camara',), height=68)
+        st.text_area("🥫 Cămara Virtuală (Produse pe care le ai deja acasă - excluse de la plată):", key=init_ui('camara'), on_change=sync, args=('camara',), height=68)
 
     st.subheader(f"📋 Lista de Cumpărături ({st.session_state.zi_cumparaturi})")
     if st.session_state.plan_df is not None and not st.session_state.plan_df.empty:
@@ -853,7 +947,10 @@ elif selected_tab == "Cumpărături":
             st.session_state.plan_df = df_edit
             if "Preț Raft (RON)" in df_edit.columns:
                 total_cump = pd.to_numeric(df_edit["Preț Raft (RON)"], errors='coerce').sum()
+                bifat_count = int(df_edit["Cumpărat"].sum()) if "Cumpărat" in df_edit.columns else 0
+                procent_cos = bifat_count / max(1, len(df_edit))
                 ramas = pd.to_numeric(df_edit[~df_edit["Cumpărat"]]["Preț Raft (RON)"], errors='coerce').sum()
+                st.progress(procent_cos, text=f"Progres cumpărături: {bifat_count} din {len(df_edit)} produse în coș ({int(procent_cos*100)}%)")
                 c_tot1, c_tot2 = st.columns(2)
                 c_tot1.metric("💰 Total Estimativ la Raft", f"{total_cump:.2f} RON")
                 c_tot2.metric("🛒 Rămas de pus în coș", f"{ramas:.2f} RON")
@@ -864,10 +961,13 @@ elif selected_tab == "Cumpărături":
     st.subheader("🏷️ Verifică & Actualizează Macronutrienții la Raft")
     with st.container(border=True):
         produse_lista = st.session_state.plan_df["Produs"].tolist() if (st.session_state.plan_df is not None and "Produs" in st.session_state.plan_df.columns) else []
-        prod_sel = st.selectbox("Alege produsul:", produse_lista + ["Alt produs (scrie manual)..."])
-        prod_final = st.text_input("Nume produs:") if prod_sel == "Alt produs (scrie manual)..." else prod_sel
-        poza_et = st.file_uploader("📸 Încarcă poza cu tabelul nutrițional (per 100g):", type=["png", "jpg", "jpeg"])
-        if st.button("⚡ Extrage Eticheta & Recalculează Rețetele", type="primary", use_container_width=True) and prod_final and poza_et:
+        col_et1, col_et2 = st.columns(2)
+        with col_et1:
+            prod_sel = st.selectbox("Alege produsul din listă:", produse_lista + ["Alt produs (scrie manual)..."])
+            prod_final = st.text_input("Nume produs:") if prod_sel == "Alt produs (scrie manual)..." else prod_sel
+        with col_et2:
+            poza_et = st.file_uploader("📸 Încarcă poza cu tabelul nutrițional (per 100g):", type=["png", "jpg", "jpeg"])
+        if st.button("⚡ Extrage Eticheta & Recalculează Rețetele Active", type="primary", use_container_width=True) and prod_final and poza_et:
             res_lbl, _ = generate_with_ai(['Extrage valorile nutriționale per 100g în JSON: {"kcal_100g": 115, "prot_100g": 9.0, "carb_100g": 3.8, "gras_100g": 5.0}', Image.open(poza_et)], expect_json=True)
             if res_lbl:
                 try:
@@ -881,11 +981,15 @@ elif selected_tab == "Cumpărături":
                     st.error(f"Eroare citire etichetă: {e}")
 
     st.write("---")
-    st.subheader("🧾 Scanează Bonul Fiscal")
+    st.subheader("🧾 Scanează Bonul Fiscal (Salvare Prețuri pe Magazin)")
     with st.container(border=True):
-        mag_bon = st.selectbox("Magazin bon:", magazine_disponibile)
-        poza_bon = st.file_uploader("📸 Încarcă poza cu bonul fiscal:", type=["png", "jpg", "jpeg"])
-        if st.button("💳 Extrage Prețurile de pe Bon", type="primary", use_container_width=True) and poza_bon:
+        col_bon1, col_bon2 = st.columns([1, 1.3])
+        with col_bon1:
+            mag_bon = st.selectbox("De la ce magazin e bonul?", magazine_disponibile)
+            st.markdown(render_store_logos_html([mag_bon], height_px=32), unsafe_allow_html=True)
+        with col_bon2:
+            poza_bon = st.file_uploader("📸 Încarcă poza cu bonul fiscal:", type=["png", "jpg", "jpeg"])
+        if st.button("💳 Extrage Prețurile de pe Bon & Actualizează Baza de Date", type="primary", use_container_width=True) and poza_bon:
             res_b, _ = generate_with_ai([f'Extrage produsele alimentare de pe bonul {mag_bon} în JSON: {{"produse_bon": [{{"nume_clar": "Produs", "pret_ron": 12.50, "cantitate_sau_ambalaj": "1 buc"}}]}}', Image.open(poza_bon)], expect_json=True)
             if res_b:
                 try:
@@ -911,21 +1015,39 @@ elif selected_tab == "Dietă & Mese":
         with c2: st.slider("📅 Zile planificate:", 1, 7, key=init_ui('zile'), on_change=on_scale_change)
         st.session_state.ui_buget_slider = (int(st.session_state.buget_min), int(st.session_state.buget_max))
         st.slider("💰 Interval Buget Alocat (Min - Max RON):", 20, 2500, step=10, key="ui_buget_slider", on_change=sync_budget_from_slider)
+        st.caption(f"Buget activ: **{st.session_state.buget_min} RON – {st.session_state.buget_max} RON**")
 
-    if not st.session_state.mod_simplificat:
-        st.subheader("🏥 Sănătate, Echipamente & Stil Gătire")
-        with st.container(border=True):
-            col_e1, col_e2 = st.columns(2)
-            with col_e1:
-                st.multiselect("🍳 Aparate în bucătărie:", lista_echipamente, key=init_ui('echipamente'), on_change=sync, args=('echipamente',))
-                st.multiselect("🩺 Preferințe Medicale:", lista_medicale, key=init_ui('preferinte_medicale'), on_change=sync, args=('preferinte_medicale',))
-            with col_e2:
-                st.multiselect("🚫 Alergeni / Interzise:", lista_alergeni, key=init_ui('alergeni'), on_change=sync, args=('alergeni',))
-                st.selectbox("⏱️ Stil de gătire:", opts_gatire, key=init_ui('tip_reteta'), on_change=sync, args=('tip_reteta',))
-            st.checkbox("🍲 Activează Mod Batch Cooking (Gătești o singură dată pentru caserole)", key=init_ui('batch_cooking'), on_change=sync, args=('batch_cooking',))
+    st.subheader("🏥 Sănătate, Echipamente & Stil Gătire")
+    with st.container(border=True):
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            st.multiselect("🍳 Aparate în bucătărie:", lista_echipamente, key=init_ui('echipamente'), on_change=sync, args=('echipamente',))
+            st.multiselect("🩺 Preferințe Medicale:", lista_medicale, key=init_ui('preferinte_medicale'), on_change=sync, args=('preferinte_medicale',))
+        with col_e2:
+            st.multiselect("🚫 Alergeni / Interzise:", lista_alergeni, key=init_ui('alergeni'), on_change=sync, args=('alergeni',))
+            st.selectbox("⏱️ Stil de gătire:", opts_gatire, key=init_ui('tip_reteta'), on_change=sync, args=('tip_reteta',))
+        st.checkbox("🍲 Activează Mod Batch Cooking (Gătești o singură dată cantități mari pentru caserole)", key=init_ui('batch_cooking'), on_change=sync, args=('batch_cooking',))
+
+    st.subheader("📅 Cronologia Meselor")
+    with st.container(border=True):
+        taburi_zile = st.tabs(["Structură Mese (Batch)"]) if st.session_state.batch_cooking else st.tabs([f"Ziua {i}" for i in range(1, st.session_state.zile + 1)])
+        zile_iter = [1] if st.session_state.batch_cooking else range(1, st.session_state.zile + 1)
+        for idx, tab_zi in enumerate(taburi_zile):
+            zi = zile_iter[idx]
+            with tab_zi:
+                nr_mese = st.number_input("Număr de mese principale:", 1, 6, value=3, key=f"nr_m_{zi}")
+                mese_azi = []
+                cols_m = st.columns(min(3, nr_mese))
+                for m in range(nr_mese):
+                    opt = ["Mic dejun", "Prânz", "Cină", "Masa 4", "Masa 5"]
+                    n_def = opt[m] if m < len(opt) else f"Masa {m+1}"
+                    with cols_m[m % len(cols_m)]:
+                        sel = st.selectbox(f"Masa {m+1}", options=opt, index=min(m, len(opt)-1), key=f"sel_tip_m_{zi}_{m}")
+                        mese_azi.append(sel)
+                st.session_state.config_mese[f"Ziua {zi}"] = mese_azi
 
 # ==========================================
-# TAB 4: PROFIL
+# TAB 4: PROFIL (CU PIE CHART INTEGRAT GARANTAT)
 # ==========================================
 elif selected_tab == "Profil":
     st.subheader("👤 Date Biometrice & Obiectiv (Auto-Sincronizare Activă)")
@@ -941,53 +1063,69 @@ elif selected_tab == "Profil":
             st.selectbox("Obiectiv nutrițional", obj_opts, key=init_ui('obiectiv'), on_change=recalc_from_biometrics)
 
     with st.container(border=True):
+        st.markdown("#### 📉 Configurare Protocol Caloric & Macronutrienți")
         c_slab1, c_slab2 = st.columns(2)
         with c_slab1:
             if "Slăbire" in st.session_state.obiectiv:
                 st.select_slider("Ritm slăbire:", options=ritm_opts, key=init_ui('ritm_slabire'), on_change=recalc_from_biometrics)
+            elif "Creștere masă" in st.session_state.obiectiv:
+                st.info("💪 Surplus caloric activ (+400 kcal / zi)")
             else:
-                st.info("⚖️ Protocol caloric sincronizat automat.")
+                st.info("⚖️ Regim de menținere activ (100% din TDEE)")
         with c_slab2:
             st.selectbox("Protocol Macronutrienți:", distributie_opts, key=init_ui('distributie_macro'), on_change=recalc_from_biometrics)
+            if "Menținere masă" in st.session_state.distributie_macro:
+                st.number_input("Grăsime Corporală Estimată (%)", 5, 60, key=init_ui('bf_proc'), on_change=recalc_from_biometrics)
+
+        if st.button("🚀 Aplică & Sincronizează Formula în Planificator", type="primary", use_container_width=True):
+            recalc_from_biometrics()
+            st.toast(f"Țintă sincronizată: {st.session_state.kcal_tinta} kcal!", icon="✅")
 
     calc_info = calculate_biometric_targets()
     with st.container(border=True):
         c_m1, c_m2, c_m3 = st.columns(3)
         c_m1.metric("📊 Indice BMI", f"{calc_info['bmi']:.1f}", "Normal" if 18.5 <= calc_info['bmi'] <= 25 else "Atenție")
-        c_m2.metric("🔥 Necesar Zilnic", f"{st.session_state.kcal_tinta} kcal", f"BMR: {calc_info['bmr']} kcal")
+        c_m2.metric("🔥 Necesar Zilnic (Sincronizat)", f"{st.session_state.kcal_tinta} kcal", f"BMR: {calc_info['bmr']} kcal")
         with c_m3:
+            st.write("")
             st.button("⚖️ Am stagnat (-150 Kcal)", on_click=cut_tdee, use_container_width=True)
 
     with st.container(border=True):
+        st.markdown("#### 💧 Hidratare Zilnică")
         cw1, cw2, cw3 = st.columns([1, 2, 1])
         with cw1: st.button("➖ 250 ml", on_click=sub_water, use_container_width=True)
-        with cw2: st.markdown(f"<h4 style='text-align: center; color: #09CEE6; margin:0;'>💧 {st.session_state.water_ml} ml / 2500 ml</h4>", unsafe_allow_html=True)
+        with cw2: st.markdown(f"<h4 style='text-align: center; color: #09CEE6; margin:0;'>{st.session_state.water_ml} ml / 2500 ml</h4>", unsafe_allow_html=True)
         with cw3: st.button("➕ 250 ml", on_click=add_water, use_container_width=True)
         st.progress(min(st.session_state.water_ml / 2500.0, 1.0))
 
     with st.container(border=True):
+        st.subheader("🎯 Țintă Macronutrienți / Persoană / Zi")
+        st.caption("Aceste valori se actualizează automat din datele tale și sunt trimise direct în **Planificator**:")
         c1, c2, c3 = st.columns(3)
         with c1: st.number_input("🥩 Proteine (g)", 0, 500, key=init_ui('prot_tinta'), on_change=sync_manual_macros)
         with c2: st.number_input("🌾 Carbohidrați (g)", 0, 1000, key=init_ui('carb_tinta'), on_change=sync_manual_macros)
         with c3: st.number_input("🥑 Grăsimi (g)", 0, 300, key=init_ui('gras_tinta'), on_change=sync_manual_macros)
-        df_macro = pd.DataFrame({
-            "Nutrient": ["Proteine", "Carbohidrați", "Grăsimi"],
-            "Grame": [st.session_state.prot_tinta, st.session_state.carb_tinta, st.session_state.gras_tinta],
-            "Calorii": [st.session_state.prot_tinta * 4, st.session_state.carb_tinta * 4, st.session_state.gras_tinta * 9]
-        })
-        if HAS_PLOTLY:
-            fig = px.pie(df_macro, values='Calorii', names='Nutrient', hole=0.45, color='Nutrient', color_discrete_map={"Proteine": "#FC8181", "Carbohidrați": "#68D391", "Grăsimi": "#F6E05E"})
-            fig.update_layout(height=260, margin=dict(t=10, b=10, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)', font=dict(color=text_color))
-            st.plotly_chart(fig, use_container_width=True)
+
+        # Afișează garantat graficul Pie Chart / Donut (cu sau fără librăria Plotly)
+        render_macros_pie_chart(
+            st.session_state.prot_tinta,
+            st.session_state.carb_tinta,
+            st.session_state.gras_tinta
+        )
 
 # ==========================================
 # TAB 5: REȚETAR
 # ==========================================
 elif selected_tab == "Rețetar":
-    sub_fav, sub_etichete, sub_preturi = st.tabs(["📖 Rețete Favorite", "🏷️ Catalog Nutrițional", "💰 Prețuri Bonuri"])
+    sub_fav, sub_etichete, sub_preturi = st.tabs([
+        "📖 Rețete Favorite",
+        "🏷️ Scanner Etichete Nutriționale",
+        "💰 Bază Prețuri Bonuri"
+    ])
     with sub_fav:
+        st.subheader("📖 Rețetarul Meu (Salvate Permanent)")
         if not st.session_state.retetar_favorite:
-            st.info("Nu ai încă rețete salvate.")
+            st.info("Nu ai încă rețete salvate. Generează un plan în 'Planificator' și apasă pe '🖤 Salvează în Rețetar'!")
         else:
             for idx, fav in enumerate(st.session_state.retetar_favorite):
                 render_recipe_card(fav, index=idx, allow_actions=False)
@@ -996,15 +1134,57 @@ elif selected_tab == "Rețetar":
                     st.session_state.db["retetar_favorite"] = st.session_state.retetar_favorite
                     save_local_db(st.session_state.db)
                     st.rerun()
+
     with sub_etichete:
+        st.subheader("🏷️ Adaugă Produs prin Poză la Eticheta Nutrițională")
+        with st.container(border=True):
+            c_l1, c_l2 = st.columns(2)
+            with c_l1: nume_prod_et = st.text_input("Denumirea produsului:", placeholder="Ex: Brânză Cottage Lidl Pilos 3%")
+            with c_l2: poza_lbl_ret = st.file_uploader("📸 Încarcă poza cu eticheta:", type=["png", "jpg", "jpeg"])
+            if st.button("💾 Scanează & Salvează în Catalogul Nutrițional", type="primary", use_container_width=True) and poza_lbl_ret:
+                res_l2, _ = generate_with_ai([f'Extrage valorile per 100g în JSON: {{"nume_identificat": "{nume_prod_et or "Produs"}", "kcal_100g": 115, "prot_100g": 9.0, "carb_100g": 3.8, "gras_100g": 5.0}}', Image.open(poza_lbl_ret)], expect_json=True)
+                if res_l2:
+                    try:
+                        d_l2 = parse_ai_json(res_l2.text)
+                        fn = nume_prod_et.strip() if nume_prod_et.strip() else str(d_l2.get("nume_identificat", "Produs")).strip()
+                        kv, pv, cv, gv = float(d_l2.get("kcal_100g", 0)), float(d_l2.get("prot_100g", 0)), float(d_l2.get("carb_100g", 0)), float(d_l2.get("gras_100g", 0))
+                        st.session_state.db["catalog_nutritie"][fn.lower()] = {"nume_afisat": fn, "kcal_100g": kv, "prot_100g": pv, "carb_100g": cv, "gras_100g": gv, "data": datetime.now().strftime("%Y-%m-%d")}
+                        save_local_db(st.session_state.db)
+                        recalculate_active_recipes_macros(fn, kv, pv, cv, gv)
+                        st.success(f"✅ Produsul **{fn}** a fost salvat!")
+                    except Exception as e:
+                        st.error(f"Eroare citire etichetă: {e}")
+
         cat_n = st.session_state.db.get("catalog_nutritie", {})
         if cat_n:
-            st.dataframe(pd.DataFrame([{"Produs": v.get("nume_afisat", k), "Kcal/100g": v.get("kcal_100g", 0), "P (g)": v.get("prot_100g", 0), "C (g)": v.get("carb_100g", 0), "G (g)": v.get("gras_100g", 0)} for k, v in cat_n.items()]), use_container_width=True, hide_index=True)
-        else:
-            st.caption("Nicio etichetă salvată încă.")
+            st.dataframe(pd.DataFrame([{"Produs": v.get("nume_afisat", k), "Kcal / 100g": v.get("kcal_100g", 0), "Proteine (g)": v.get("prot_100g", 0), "Carbohidrați (g)": v.get("carb_100g", 0), "Grăsimi (g)": v.get("gras_100g", 0)} for k, v in cat_n.items()]), use_container_width=True, hide_index=True)
+
     with sub_preturi:
-        rows_p = [{"Magazin": m, "Produs": p.get("nume_afisat", k), "Preț (RON)": p.get("pret", 0.0)} for m, d in st.session_state.db.get("preturi_magazine", {}).items() for k, p in d.items()]
+        rows_p = [{"Magazin": m, "Produs": p.get("nume_afisat", k), "Preț Bon (RON)": p.get("pret", 0.0), "Ambalaj": p.get("ambalaj", "1 buc")} for m, d in st.session_state.db.get("preturi_magazine", {}).items() for k, p in d.items()]
         if rows_p:
             st.dataframe(pd.DataFrame(rows_p), use_container_width=True, hide_index=True)
         else:
-            st.caption("Niciun bon fiscal scanat încă.")
+            st.info("Nu ai scanat încă niciun bon fiscal.")
+
+# ==========================================
+# INJECȚIE JAVASCRIPT PT. CULORI BUTOANE
+# ==========================================
+components.html("""
+<script>
+    const observer = new MutationObserver(function() {
+        const buttons = window.parent.document.querySelectorAll('button');
+        buttons.forEach(b => {
+            if(b.innerText.includes('250 ml')) {
+                b.style.backgroundColor = '#09CEE6'; b.style.color = '#0B132B'; b.style.border = 'none';
+            }
+            if(b.innerText.includes('Am stagnat')) {
+                b.style.backgroundColor = '#FFD54F'; b.style.color = '#0B132B'; b.style.border = 'none';
+            }
+            if(b.innerText.includes('❌') || b.innerText.includes('🗑️')) {
+                b.style.backgroundColor = '#E53E3E'; b.style.color = 'white'; b.style.border = 'none';
+            }
+        });
+    });
+    observer.observe(window.parent.document.body, {childList: true, subtree: true});
+</script>
+""", height=0)
