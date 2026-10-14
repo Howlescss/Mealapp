@@ -50,7 +50,6 @@ LEGACY_DB_FILE = "nutritie_db.json"
 
 @st.cache_resource
 def get_global_memory_cache():
-    """Memorie RAM persistentă pe server între reîncărcări (F5) și sesiuni."""
     store = {}
     if os.path.exists(DEVICES_DB_FILE):
         try:
@@ -81,7 +80,6 @@ def load_legacy_defaults():
     return default_db
 
 def get_or_create_device_uid():
-    """Preia ID-ul dispozitivului din URL sau generează unul nou sincronizat cu localStorage."""
     q_uid = st.query_params.get("uid", "")
     if isinstance(q_uid, list):
         q_uid = q_uid[0] if q_uid else ""
@@ -108,12 +106,12 @@ PERSISTENT_KEYS = [
     "magazine_selectate", "zi_cumparaturi", "echipamente",
     "alergeni", "alte_restrictii", "preferinte_medicale",
     "tip_reteta", "batch_cooking", "camara", "config_mese",
-    "plan_retete", "retetar_favorite", "include_favorites",
-    "mese_de_pastrat", "retete_respinse", "varianta_meniu", "water_ml"
+    "sincronizeaza_zile_mese", "plan_retete", "retetar_favorite",
+    "include_favorites", "mese_de_pastrat", "retete_respinse",
+    "varianta_meniu", "water_ml"
 ]
 
 def save_device_state():
-    """Salvează instantaneu toată starea dispozitivului curent în RAM Cache + fișier JSON."""
     if not st.session_state.get("init_done"):
         return
     uid = st.session_state.get("device_uid")
@@ -142,7 +140,6 @@ def save_device_state():
         pass
 
 def load_device_state(uid):
-    """Încarcă starea salvată a dispozitivului curent (dacă există)."""
     mem_cache = get_global_memory_cache()
     if uid in mem_cache and isinstance(mem_cache[uid], dict):
         return mem_cache[uid]
@@ -151,6 +148,37 @@ def load_device_state(uid):
 def save_local_db(db_data):
     st.session_state.db = db_data
     save_device_state()
+
+# ==========================================
+# HELPER PENTRU CITIREA CORECTĂ A MESELOR CONFIGURATE
+# ==========================================
+def get_configured_meals_for_day(day_num=1):
+    cfg = st.session_state.get("config_mese", {})
+    if st.session_state.get("batch_cooking") or st.session_state.get("sincronizeaza_zile_mese", True):
+        meals = cfg.get("Ziua 1", ["Mic dejun", "Prânz", "Cină"])
+    else:
+        meals = cfg.get(f"Ziua {day_num}", cfg.get("Ziua 1", ["Mic dejun", "Prânz", "Cină"]))
+    if not meals or not isinstance(meals, list):
+        return ["Mic dejun", "Prânz", "Cină"]
+    return [str(m).strip() for m in meals if str(m).strip()]
+
+def get_meal_weights(meals_list):
+    """Calculează ponderea calorică a fiecărei mese astfel încât suma pe zi să fie mereu 100%."""
+    raw_weights = []
+    for m in meals_list:
+        ml = m.lower()
+        if "mic" in ml:
+            raw_weights.append(0.28)
+        elif "prânz" in ml or "pranz" in ml:
+            raw_weights.append(0.42)
+        elif "cin" in ml:
+            raw_weights.append(0.32)
+        elif "gustare" in ml:
+            raw_weights.append(0.15)
+        else:
+            raw_weights.append(0.30)
+    total_w = sum(raw_weights) if sum(raw_weights) > 0 else 1.0
+    return [w / total_w for w in raw_weights]
 
 # ==========================================
 # LOGO-URI MAGAZINE (CĂUTARE INTELIGENTĂ + SVG INTEGRAT)
@@ -472,15 +500,63 @@ MEAL_ALTERNATIVES_CATALOG = {
             ],
             "depozitare": "Păstrează sosul tzatziki într-un recipient mic separat."
         }
+    ],
+    "Gustare": [
+        {
+            "nume": "Bowl proteic cu Iaurt Skyr, fructe de pădure și mix de nuci/migdale",
+            "timp": "5 min",
+            "aparate": ["Fără gătire"],
+            "ingrediente_baza": [
+                {"produs": "Iaurt Skyr / Grecesc 2%", "categorie": "Lactate & Ouă", "cant_pers_g": 180, "ambalaj": "Pahar 400g", "pret_amb": 7.99, "pret_portie": 3.60, "kcal_100": 65, "p_100": 11.0, "c_100": 4.0, "g_100": 0.5},
+                {"produs": "Mix nuci & migdale crude", "categorie": "Băcănie", "cant_pers_g": 25, "ambalaj": "Pungă 200g", "pret_amb": 12.90, "pret_portie": 1.65, "kcal_100": 580, "p_100": 20.0, "c_100": 18.0, "g_100": 50.0},
+                {"produs": "Banană / Fructe proaspete", "categorie": "Legume & Fructe", "cant_pers_g": 100, "ambalaj": "1 kg", "pret_amb": 6.99, "pret_portie": 1.40, "kcal_100": 89, "p_100": 1.1, "c_100": 22.8, "g_100": 0.3}
+            ],
+            "pasi": [
+                "Pune iaurtul Skyr rece într-un bol sau caserolă.",
+                "Adaugă fructele tăiate și nucile/migdalele crocante deasupra."
+            ],
+            "depozitare": "Gata în 2 minute, ideal de luat la pachet."
+        },
+        {
+            "nume": "Gustare sărată: Brânză Cottage cu rondele de orez expandat și piept de curcan",
+            "timp": "5 min",
+            "aparate": ["Fără gătire"],
+            "ingrediente_baza": [
+                {"produs": "Brânză Cottage Light", "categorie": "Lactate & Ouă", "cant_pers_g": 150, "ambalaj": "Cutie 200g", "pret_amb": 5.49, "pret_portie": 4.10, "kcal_100": 92, "p_100": 13.0, "c_100": 3.2, "g_100": 3.0},
+                {"produs": "Șuncă piept de curcan", "categorie": "Mezeluri & Carne", "cant_pers_g": 70, "ambalaj": "Pachet 200g", "pret_amb": 10.90, "pret_portie": 3.80, "kcal_100": 105, "p_100": 21.0, "c_100": 1.0, "g_100": 2.0},
+                {"produs": "Rondele de orez integral", "categorie": "Panificație", "cant_pers_g": 35, "ambalaj": "Pachet 100g", "pret_amb": 4.49, "pret_portie": 1.55, "kcal_100": 380, "p_100": 8.0, "c_100": 80.0, "g_100": 2.8}
+            ],
+            "pasi": [
+                "Întinde brânza Cottage pe rondelele de orez integral.",
+                "Așază feliile de piept de curcan deasupra."
+            ],
+            "depozitare": "Păstrează rondelele separat ca să rămână crocante."
+        }
     ]
 }
 
+def get_catalog_category_for_meal(tip_masa):
+    ml = str(tip_masa).lower()
+    if "mic" in ml:
+        return "Mic dejun"
+    if "prânz" in ml or "pranz" in ml:
+        return "Prânz"
+    if "cin" in ml:
+        return "Cină"
+    if "gustare" in ml:
+        return "Gustare"
+    return "Prânz"
+
 def build_recipe_from_template(tpl, perioada, tip_masa, mult, mag, kcal_target_meal, p_target_meal, c_target_meal, g_target_meal):
+    # Calculăm caloriile de bază ale șablonului pentru a scala gramajele proporțional cu ținta mesei
+    base_kcal = sum((b["cant_pers_g"] / 100.0) * b["kcal_100"] for b in tpl["ingrediente_baza"])
+    scale_factor = max(0.65, min(1.85, kcal_target_meal / max(1.0, base_kcal)))
+
     ing_list = []
     cost_total = 0.0
     for b_ing in tpl["ingrediente_baza"]:
-        gramaj_tot = int(round(b_ing["cant_pers_g"] * mult))
-        pret_tot = round(b_ing["pret_portie"] * mult, 2)
+        gramaj_tot = int(round(b_ing["cant_pers_g"] * scale_factor * mult))
+        pret_tot = round(b_ing["pret_portie"] * scale_factor * mult, 2)
         cost_total += pret_tot
         ing_list.append({
             "produs": b_ing["produs"],
@@ -686,6 +762,7 @@ def call_free_cloud_relay(contents, expect_json=False):
     return None, "Releu indisponibil"
 
 def build_smart_fallback_plan(varianta_offset=0):
+    """Generează meniul respectând STRICT numărul și tipul meselor din Cronologia Meselor!"""
     zile = st.session_state.zile
     pers = st.session_state.persoane
     batch = st.session_state.batch_cooking
@@ -696,23 +773,28 @@ def build_smart_fallback_plan(varianta_offset=0):
     g_t = st.session_state.gras_tinta
     mult = (zile * pers) if batch else pers
 
-    f_md, f_pr, f_ci = 0.28, 0.42, 0.30
     retete = []
-    perioade = [f"Pentru {zile} zile (Batch)"] if batch else [f"Ziua {i}" for i in range(1, zile + 1)]
+    if batch:
+        perioade_info = [(1, f"Pentru {zile} zile (Batch)")]
+    else:
+        perioade_info = [(i, f"Ziua {i}") for i in range(1, zile + 1)]
 
-    md_list = MEAL_ALTERNATIVES_CATALOG["Mic dejun"]
-    pr_list = MEAL_ALTERNATIVES_CATALOG["Prânz"]
-    ci_list = MEAL_ALTERNATIVES_CATALOG["Cină"]
-
-    for idx_p, per in enumerate(perioade):
+    for idx_p, (zi_num, per_label) in enumerate(perioade_info):
+        mese_zi = get_configured_meals_for_day(zi_num)
+        weights = get_meal_weights(mese_zi)
         mag_curent = mags[(idx_p + varianta_offset) % len(mags)]
-        tpl_md = md_list[(idx_p + varianta_offset) % len(md_list)]
-        tpl_pr = pr_list[(idx_p + varianta_offset) % len(pr_list)]
-        tpl_ci = ci_list[(idx_p + varianta_offset) % len(ci_list)]
 
-        retete.append(build_recipe_from_template(tpl_md, per, "Mic dejun", mult, mag_curent, kcal_t*f_md, p_t*f_md, c_t*f_md, g_t*f_md))
-        retete.append(build_recipe_from_template(tpl_pr, per, "Prânz", mult, mag_curent, kcal_t*f_pr, p_t*f_pr, c_t*f_pr, g_t*f_pr))
-        retete.append(build_recipe_from_template(tpl_ci, per, "Cină", mult, mag_curent, kcal_t*f_ci, p_t*f_ci, c_t*f_ci, g_t*f_ci))
+        for m_idx, tip_m in enumerate(mese_zi):
+            w = weights[m_idx]
+            cat_key = get_catalog_category_for_meal(tip_m)
+            cat_list = MEAL_ALTERNATIVES_CATALOG.get(cat_key, MEAL_ALTERNATIVES_CATALOG["Prânz"])
+            tpl = cat_list[(idx_p + m_idx + varianta_offset) % len(cat_list)]
+            retete.append(
+                build_recipe_from_template(
+                    tpl, per_label, tip_m, mult, mag_curent,
+                    kcal_t * w, p_t * w, c_t * w, g_t * w
+                )
+            )
 
     df_cump = rebuild_shopping_df_from_recipes(retete)
     lista_cump = []
@@ -779,6 +861,7 @@ distributie_opts = [
     "Menținere masă musculară (2g P/kg corp, 1g G/kg, restul C)",
     "Ketogenic (70% Grăsimi, 20% Proteine, 10% Carbohidrați)"
 ]
+MEAL_TYPE_OPTIONS = ["Mic dejun", "Prânz", "Cină", "Gustare", "Masa 4", "Masa 5"]
 
 def calculate_biometric_targets():
     sex = st.session_state.sex
@@ -860,6 +943,8 @@ if 'init_done' not in st.session_state or st.session_state.get('loaded_uid') != 
     legacy_db = load_legacy_defaults()
     saved_prof = legacy_db.get("profil_utilizator", {})
 
+    default_cfg_mese = {f"Ziua {i}": ["Mic dejun", "Prânz", "Cină"] for i in range(1, 8)}
+
     defaults = {
         'loaded_uid': current_uid,
         'db': legacy_db,
@@ -883,7 +968,9 @@ if 'init_done' not in st.session_state or st.session_state.get('loaded_uid') != 
         'alergeni': [], 'alte_restrictii': "", 'preferinte_medicale': [],
         'tip_reteta': "Simplu și rapid <30 min", 'batch_cooking': False, 'camara': "",
         'tip_oferta': "Estimare prețuri actuale + Baza ta de bonuri", 'fisiere_poze': None,
-        'config_mese': {}, 'plan_df': None, 'plan_retete': [],
+        'config_mese': default_cfg_mese,
+        'sincronizeaza_zile_mese': True,
+        'plan_df': None, 'plan_retete': [],
         'retetar_favorite': legacy_db.get("retetar_favorite", []),
         'include_favorites': [], 'mese_de_pastrat': [],
         'retete_respinse': [], 'varianta_meniu': 0,
@@ -894,10 +981,19 @@ if 'init_done' not in st.session_state or st.session_state.get('loaded_uid') != 
         if "db" in saved_device and isinstance(saved_device["db"], dict):
             defaults["db"] = saved_device["db"]
         for k in PERSISTENT_KEYS:
-            if k in saved_device:
+            if k in saved_device and saved_device[k] is not None:
                 defaults[k] = saved_device[k]
         if saved_device.get("plan_df_records"):
             defaults["plan_df"] = pd.DataFrame(saved_device["plan_df_records"])
+
+    # Asigurăm că fiecare zi 1..7 are o listă validă în config_mese
+    if not isinstance(defaults.get("config_mese"), dict) or not defaults["config_mese"]:
+        defaults["config_mese"] = default_cfg_mese
+    else:
+        baza_z1 = defaults["config_mese"].get("Ziua 1", ["Mic dejun", "Prânz", "Cină"])
+        for i in range(1, 8):
+            if f"Ziua {i}" not in defaults["config_mese"] or not defaults["config_mese"][f"Ziua {i}"]:
+                defaults["config_mese"][f"Ziua {i}"] = list(baza_z1)
 
     st.session_state.update(defaults)
     if not saved_device and not saved_prof:
@@ -911,6 +1007,44 @@ def sync(key):
 def init_ui(key):
     st.session_state[f"ui_{key}"] = st.session_state[key]
     return f"ui_{key}"
+
+def on_nr_mese_change(zi):
+    """Callback persistent când utilizatorul schimbă numărul de mese (ex: 3 -> 2 sau 3 -> 4)."""
+    new_n = int(st.session_state.get(f"ui_nr_m_{zi}", 3))
+    cur_list = list(st.session_state.config_mese.get(f"Ziua {zi}", ["Mic dejun", "Prânz", "Cină"]))
+
+    if new_n == 2 and cur_list == ["Mic dejun", "Prânz", "Cină"]:
+        # Dacă scade de la cele 3 standard la 2 mese, setăm inteligent Prânz + Cină
+        new_list = ["Prânz", "Cină"]
+    elif new_n < len(cur_list):
+        new_list = cur_list[:new_n]
+    else:
+        new_list = list(cur_list)
+        defaults_extra = ["Mic dejun", "Prânz", "Cină", "Gustare", "Masa 4", "Masa 5"]
+        while len(new_list) < new_n:
+            idx_next = len(new_list)
+            cand = defaults_extra[idx_next] if idx_next < len(defaults_extra) else f"Masa {idx_next+1}"
+            if cand in new_list and idx_next >= 3:
+                cand = "Gustare" if "Gustare" not in new_list else f"Masa {idx_next+1}"
+            new_list.append(cand)
+
+    st.session_state.config_mese[f"Ziua {zi}"] = new_list
+    if st.session_state.get("sincronizeaza_zile_mese", True) or st.session_state.get("batch_cooking", False):
+        for d in range(1, 8):
+            st.session_state.config_mese[f"Ziua {d}"] = list(new_list)
+    save_device_state()
+
+def on_meal_type_change(zi, m_idx):
+    """Callback persistent când utilizatorul schimbă tipul unei mese (ex: Masa 1 -> Prânz, Masa 2 -> Cină)."""
+    chosen = st.session_state.get(f"ui_sel_tip_m_{zi}_{m_idx}", "Prânz")
+    cur_list = list(st.session_state.config_mese.get(f"Ziua {zi}", ["Mic dejun", "Prânz", "Cină"]))
+    if 0 <= m_idx < len(cur_list):
+        cur_list[m_idx] = chosen
+    st.session_state.config_mese[f"Ziua {zi}"] = cur_list
+    if st.session_state.get("sincronizeaza_zile_mese", True) or st.session_state.get("batch_cooking", False):
+        for d in range(1, 8):
+            st.session_state.config_mese[f"Ziua {d}"] = list(cur_list)
+    save_device_state()
 
 def sync_budget_from_inputs():
     st.session_state.buget_min = int(st.session_state.ui_buget_min)
@@ -960,15 +1094,16 @@ def replace_single_recipe(idx_reteta):
     per = old_r.get("perioada", "Ziua 1")
     portii = max(1, int(old_r.get("numar_portii", st.session_state.persoane)))
     macro_old = old_r.get("macro_per_portie", {})
-    kcal_m = macro_old.get("kcal", int(st.session_state.kcal_tinta * 0.35))
-    p_m = macro_old.get("proteine_g", int(st.session_state.prot_tinta * 0.35))
-    c_m = macro_old.get("carbo_g", int(st.session_state.carb_tinta * 0.35))
-    g_m = macro_old.get("grasimi_g", int(st.session_state.gras_tinta * 0.35))
+    kcal_m = macro_old.get("kcal", int(st.session_state.kcal_tinta * 0.5))
+    p_m = macro_old.get("proteine_g", int(st.session_state.prot_tinta * 0.5))
+    c_m = macro_old.get("carbo_g", int(st.session_state.carb_tinta * 0.5))
+    g_m = macro_old.get("grasimi_g", int(st.session_state.gras_tinta * 0.5))
 
-    cat_key = "Mic dejun" if "mic" in tip_m.lower() else ("Cină" if "cin" in tip_m.lower() else "Prânz")
-    candidates = [t for t in MEAL_ALTERNATIVES_CATALOG[cat_key] if t["nume"] not in st.session_state.retete_respinse and t["nume"] != old_name]
+    cat_key = get_catalog_category_for_meal(tip_m)
+    cat_list = MEAL_ALTERNATIVES_CATALOG.get(cat_key, MEAL_ALTERNATIVES_CATALOG["Prânz"])
+    candidates = [t for t in cat_list if t["nume"] not in st.session_state.retete_respinse and t["nume"] != old_name]
     if not candidates:
-        candidates = [t for t in MEAL_ALTERNATIVES_CATALOG[cat_key] if t["nume"] != old_name] or MEAL_ALTERNATIVES_CATALOG[cat_key]
+        candidates = [t for t in cat_list if t["nume"] != old_name] or cat_list
 
     st.session_state.varianta_meniu += 1
     chosen_tpl = candidates[st.session_state.varianta_meniu % len(candidates)]
@@ -978,6 +1113,67 @@ def replace_single_recipe(idx_reteta):
     st.session_state.plan_retete[idx_reteta] = new_r
     st.session_state.plan_df = rebuild_shopping_df_from_recipes(st.session_state.plan_retete)
     save_device_state()
+
+def enforce_configured_meals_on_recipes(ai_retete):
+    """
+    Verifică și aliniază rețetele primite de la AI astfel încât să respecte STRICT
+    numărul și tipurile de mese alese de utilizator în Cronologia Meselor!
+    Dacă utilizatorul a ales doar 2 mese (Prânz și Cină), elimină orice Mic dejun nedorit!
+    """
+    zile = st.session_state.zile
+    pers = st.session_state.persoane
+    batch = st.session_state.batch_cooking
+    mult = (zile * pers) if batch else pers
+    mag = st.session_state.magazine_selectate[0] if st.session_state.magazine_selectate else "Lidl"
+    kcal_t = st.session_state.kcal_tinta
+    p_t = st.session_state.prot_tinta
+    c_t = st.session_state.carb_tinta
+    g_t = st.session_state.gras_tinta
+
+    if batch:
+        perioade_info = [(1, f"Pentru {zile} zile (Batch)")]
+    else:
+        perioade_info = [(i, f"Ziua {i}") for i in range(1, zile + 1)]
+
+    expected_slots = []
+    for zi_num, per_label in perioade_info:
+        mese_zi = get_configured_meals_for_day(zi_num)
+        weights = get_meal_weights(mese_zi)
+        for m_idx, tip_m in enumerate(mese_zi):
+            expected_slots.append((zi_num, per_label, tip_m, weights[m_idx]))
+
+    # Dacă AI-ul a returnat alt număr de mese sau a inclus mese necerute, filtrăm și completăm exact pe sloturi
+    used_indices = set()
+    final_retete = []
+
+    for slot_idx, (zi_num, per_label, tip_m, weight) in enumerate(expected_slots):
+        matched_recipe = None
+        for r_idx, r in enumerate(ai_retete):
+            if r_idx in used_indices:
+                continue
+            r_tip = str(r.get("tip_masa", "")).strip().lower()
+            if r_tip == tip_m.lower() or (tip_m.lower() in r_tip) or (r_tip in tip_m.lower()):
+                matched_recipe = r
+                used_indices.add(r_idx)
+                break
+
+        if matched_recipe is not None:
+            matched_recipe["perioada"] = per_label
+            matched_recipe["tip_masa"] = tip_m
+            matched_recipe["numar_portii"] = mult
+            final_retete.append(matched_recipe)
+        else:
+            cat_key = get_catalog_category_for_meal(tip_m)
+            cat_list = MEAL_ALTERNATIVES_CATALOG.get(cat_key, MEAL_ALTERNATIVES_CATALOG["Prânz"])
+            tpl = cat_list[(slot_idx + st.session_state.varianta_meniu) % len(cat_list)]
+            final_retete.append(
+                build_recipe_from_template(
+                    tpl, per_label, tip_m, mult, mag,
+                    kcal_t * weight, p_t * weight, c_t * weight, g_t * weight
+                )
+            )
+
+    return final_retete
 
 def run_full_menu_generation(is_regeneration=False, custom_hint=""):
     kcal_zi_tinta = st.session_state.kcal_tinta
@@ -1001,10 +1197,23 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
         for prod_k, info_p in st.session_state.db.get("preturi_magazine", {}).get(m_sel, {}).items():
             preturi_salvate_txt += f"- {m_sel}: {prod_k} = {info_p.get('pret')} RON\n"
 
+    # Citim EXACT mesele configurate în Cronologia Meselor
     if st.session_state.batch_cooking:
-        instructiune_mod = f'MOD BATCH COOKING: Generează câte o rețetă pentru Mic dejun, Prânz, Cină cu perioada="Pentru {st.session_state.zile} zile (Batch)" și numar_portii={st.session_state.zile * st.session_state.persoane}.'
+        mese_b = get_configured_meals_for_day(1)
+        instructiune_mod = (
+            f'MOD BATCH COOKING: Generează DOAR {len(mese_b)} rețete în total, câte una pentru: {", ".join(mese_b)}, '
+            f'cu perioada="Pentru {st.session_state.zile} zile (Batch)" și numar_portii={st.session_state.zile * st.session_state.persoane}. '
+            f'INTERZIS să generezi alte mese în afară de: {", ".join(mese_b)}!'
+        )
     else:
-        instructiune_mod = f'MOD ZILNIC: Generează Mic dejun, Prânz și Cină pentru fiecare din cele {st.session_state.zile} zile (Ziua 1..Ziua {st.session_state.zile}).'
+        linii_zile = []
+        for d in range(1, st.session_state.zile + 1):
+            m_d = get_configured_meals_for_day(d)
+            linii_zile.append(f'- Ziua {d} (EXACT {len(m_d)} mese): {", ".join(m_d)}')
+        instructiune_mod = (
+            "MOD ZILNIC - Respectă STRICT această structură de mese (INTERZIS să adaugi Mic dejun sau altă masă dacă nu apare în listă!):\n"
+            + "\n".join(linii_zile)
+        )
 
     stiluri_culinare = [
         "Focus pe preparate rapide și savuroase din pui, paste, wrap-uri și salate bogate",
@@ -1021,7 +1230,7 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
     {f"PREFERINȚĂ SPECIALĂ CERUTĂ ACUM DE UTILIZATOR: {custom_hint}" if custom_hint else ""}
     INTERZIS SĂ REPEȚI ACESTE REȚETE ANTERIOARE (generează mâncăruri COMPLET DIFERITE): {interzise_str}.
     Persoane: {st.session_state.persoane} | Zile: {st.session_state.zile} | Buget: {st.session_state.buget_min}-{st.session_state.buget_max} RON.
-    Țintă/persoană/zi: {kcal_zi_tinta} kcal ({st.session_state.prot_tinta}g P, {st.session_state.carb_tinta}g C, {st.session_state.gras_tinta}g G).
+    Țintă/persoană/zi: {kcal_zi_tinta} kcal ({st.session_state.prot_tinta}g P, {st.session_state.carb_tinta}g C, {st.session_state.gras_tinta}g G). Suma meselor configurate într-o zi trebuie să egaleze această țintă!
     Aparate: {echip} | Stil: {st.session_state.tip_reteta} | Restricții: {alg if alg.strip() else 'Fără'}.
     Prețuri din bonuri: {preturi_salvate_txt if preturi_salvate_txt else 'Folosește prețurile reale din România 2026.'}
     {instructiune_mod}
@@ -1058,22 +1267,15 @@ def run_full_menu_generation(is_regeneration=False, custom_hint=""):
             fallback_data = json.loads(build_smart_fallback_plan(varianta_offset=st.session_state.varianta_meniu))
             retete_list = fallback_data.get("retete", retete_list)
 
+    # Filtrăm și aliniem strict la mesele configurate în Cronologia Meselor (ex: doar Prânz și Cină)
+    retete_list = enforce_configured_meals_on_recipes(retete_list)
+
     for idx_lock, r_lock in locked_recipes:
         if idx_lock < len(retete_list):
             retete_list[idx_lock] = r_lock
 
     st.session_state.plan_retete = retete_list
-
-    lista_cump = data_parsed.get("lista_cumparaturi", [])
-    if locked_recipes or not lista_cump:
-        st.session_state.plan_df = rebuild_shopping_df_from_recipes(retete_list)
-    else:
-        df = pd.DataFrame(lista_cump)
-        df.rename(columns={"produs": "Produs", "magazin": "Magazin", "categorie": "Categorie", "cantitate_necesara": "Cantitate Rețete", "ambalaj_raft": "Ambalaj Raft", "pret_raft_ron": "Preț Raft (RON)", "kcal_100g": "Kcal / 100g"}, inplace=True)
-        if 'Cumpărat' not in df.columns:
-            df.insert(0, 'Cumpărat', False)
-        st.session_state.plan_df = df
-
+    st.session_state.plan_df = rebuild_shopping_df_from_recipes(retete_list)
     save_device_state()
 
 # ==========================================
@@ -1270,11 +1472,13 @@ if selected_tab == "Planificator":
     logos_bar = render_store_logos_html(st.session_state.magazine_selectate, height_px=26)
     nr_preturi_db = sum(len(v) for v in st.session_state.db.get("preturi_magazine", {}).values())
     nr_nutri_db = len(st.session_state.db.get("catalog_nutritie", {}))
+    mese_active_z1 = get_configured_meals_for_day(1)
+    rezumat_mese_str = f"{len(mese_active_z1)} Mese/zi ({', '.join(mese_active_z1)})"
 
     with st.container(border=True):
         st.markdown(
             f'<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(165px, 1fr)); gap:10px; margin-bottom:10px;">'
-            f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">👨‍👩‍👧 CONFIGURAȚIE PLAN</div><div style="font-size:17px; font-weight:800; color:#FFF; margin-top:4px;">{st.session_state.persoane} Pers. • {st.session_state.zile} Zile</div><div style="font-size:11px; color:#09CEE6;">{"🍲 Mod Batch Cooking" if st.session_state.batch_cooking else "📅 Meniu Zilnic"}</div></div>'
+            f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">👨‍👩‍👧 CONFIGURAȚIE PLAN</div><div style="font-size:17px; font-weight:800; color:#FFF; margin-top:4px;">{st.session_state.persoane} Pers. • {st.session_state.zile} Zile</div><div style="font-size:11px; color:#09CEE6; margin-top:2px;">🍽️ {rezumat_mese_str}</div></div>'
             f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">🎯 ȚINTĂ ZILNICĂ / PERS.</div><div style="font-size:18px; font-weight:800; color:#F6AD55; margin-top:4px;">🔥 {kcal_zi_tinta} kcal</div><div style="font-size:11.5px; font-weight:700;"><span style="color:#FC8181;">{st.session_state.prot_tinta}g P</span> • <span style="color:#68D391;">{st.session_state.carb_tinta}g C</span> • <span style="color:#F6E05E;">{st.session_state.gras_tinta}g G</span></div></div>'
             f'<div style="background:#0B132B; padding:12px; border-radius:14px; border:1px solid #2D3748;"><div style="font-size:11px; color:#A0AEC0;">💰 BUGET & MAGAZINE</div><div style="font-size:17px; font-weight:800; color:#68D391; margin-top:4px;">{st.session_state.buget_min} - {st.session_state.buget_max} RON</div><div style="margin-top:6px;">{logos_bar}</div></div></div>'
             f'<div style="display:flex; justify-content:space-between; flex-wrap:wrap; font-size:11.5px; color:#A0AEC0; background:rgba(9,206,230,0.07); padding:7px 12px; border-radius:10px;">'
@@ -1303,7 +1507,7 @@ if selected_tab == "Planificator":
             st.session_state.fisiere_poze = st.file_uploader("Încarcă imagini din catalogul de reduceri:", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
     if st.button("🔥 GENEREAZĂ PLANUL ȘI CALCULEAZĂ PREȚURILE", type="primary", use_container_width=True):
-        with st.spinner(f"Se creează meniul optimizat pentru {kcal_zi_tinta} kcal/zi și se salvează pe dispozitiv..."):
+        with st.spinner(f"Se creează meniul ({rezumat_mese_str}) pentru {kcal_zi_tinta} kcal/zi și se salvează pe dispozitiv..."):
             run_full_menu_generation(is_regeneration=False)
 
     if st.session_state.plan_df is not None and st.session_state.plan_retete:
@@ -1462,7 +1666,7 @@ elif selected_tab == "Cumpărături":
                     st.error(f"Eroare procesare bon: {e}")
 
 # ==========================================
-# TAB 3: DIETĂ & MESE
+# TAB 3: DIETĂ & MESE (CU CRONOLOGIE PERSISTENTĂ CARE NU SE MAI RESETEAZĂ)
 # ==========================================
 elif selected_tab == "Dietă & Mese":
     st.subheader("👥 Configurare Persoane, Zile & Buget")
@@ -1485,22 +1689,66 @@ elif selected_tab == "Dietă & Mese":
             st.selectbox("⏱️ Stil de gătire:", opts_gatire, key=init_ui('tip_reteta'), on_change=sync, args=('tip_reteta',))
         st.checkbox("🍲 Activează Mod Batch Cooking (Gătești o singură dată cantități mari pentru caserole)", key=init_ui('batch_cooking'), on_change=sync, args=('batch_cooking',))
 
-    st.subheader("📅 Cronologia Meselor")
+    st.subheader("📅 Cronologia Meselor (Salvată Automat)")
     with st.container(border=True):
-        taburi_zile = st.tabs(["Structură Mese (Batch)"]) if st.session_state.batch_cooking else st.tabs([f"Ziua {i}" for i in range(1, st.session_state.zile + 1)])
-        zile_iter = [1] if st.session_state.batch_cooking else range(1, st.session_state.zile + 1)
+        if not st.session_state.batch_cooking:
+            st.checkbox(
+                "🔗 Folosește aceeași structură de mese în toate zilele planificate",
+                key=init_ui('sincronizeaza_zile_mese'),
+                on_change=sync,
+                args=('sincronizeaza_zile_mese',)
+            )
+
+        if st.session_state.batch_cooking or st.session_state.get("sincronizeaza_zile_mese", True):
+            taburi_zile = st.tabs(["Structură Mese (Toate Zilele)"])
+            zile_iter = [1]
+        else:
+            taburi_zile = st.tabs([f"Ziua {i}" for i in range(1, st.session_state.zile + 1)])
+            zile_iter = list(range(1, st.session_state.zile + 1))
+
         for idx, tab_zi in enumerate(taburi_zile):
             zi = zile_iter[idx]
             with tab_zi:
-                nr_mese = st.number_input("Număr de mese principale:", 1, 6, value=3, key=f"nr_m_{zi}")
-                mese_azi = []
-                cols_m = st.columns(min(3, nr_mese))
-                for m in range(nr_mese):
-                    opt = ["Mic dejun", "Prânz", "Cină", "Masa 4", "Masa 5"]
+                saved_meals_for_zi = list(st.session_state.config_mese.get(f"Ziua {zi}", ["Mic dejun", "Prânz", "Cină"]))
+                if not saved_meals_for_zi:
+                    saved_meals_for_zi = ["Mic dejun", "Prânz", "Cină"]
+                    st.session_state.config_mese[f"Ziua {zi}"] = saved_meals_for_zi
+
+                # Inițializăm numărul de mese direct din configurația salvată (nu din value=3 fix!)
+                st.session_state[f"ui_nr_m_{zi}"] = len(saved_meals_for_zi)
+                nr_mese = st.number_input(
+                    "Număr de mese pe zi:",
+                    min_value=1,
+                    max_value=6,
+                    key=f"ui_nr_m_{zi}",
+                    on_change=on_nr_mese_change,
+                    args=(zi,)
+                )
+
+                # Re-citim lista după eventualul resize
+                current_meals_zi = list(st.session_state.config_mese.get(f"Ziua {zi}", saved_meals_for_zi))
+                cols_m = st.columns(min(3, len(current_meals_zi)))
+
+                for m in range(len(current_meals_zi)):
+                    val_curenta = current_meals_zi[m] if current_meals_zi[m] in MEAL_TYPE_OPTIONS else MEAL_TYPE_OPTIONS[min(m, len(MEAL_TYPE_OPTIONS)-1)]
+                    st.session_state[f"ui_sel_tip_m_{zi}_{m}"] = val_curenta
                     with cols_m[m % len(cols_m)]:
-                        sel = st.selectbox(f"Masa {m+1}", options=opt, index=min(m, len(opt)-1), key=f"sel_tip_m_{zi}_{m}")
-                        mese_azi.append(sel)
-                st.session_state.config_mese[f"Ziua {zi}"] = mese_azi
+                        st.selectbox(
+                            f"Masa {m+1}",
+                            options=MEAL_TYPE_OPTIONS,
+                            key=f"ui_sel_tip_m_{zi}_{m}",
+                            on_change=on_meal_type_change,
+                            args=(zi, m)
+                        )
+
+                weights_preview = get_meal_weights(current_meals_zi)
+                preview_parts = [f"<b>{m_name}</b> (~{int(round(st.session_state.kcal_tinta * w))} kcal)" for m_name, w in zip(current_meals_zi, weights_preview)]
+                st.markdown(
+                    f'<div style="margin-top:8px; background:rgba(9,206,230,0.08); border:1px solid rgba(9,206,230,0.3); padding:8px 12px; border-radius:10px; font-size:12.5px; color:#E2E8F0;">'
+                    f'✅ <b>Mese active salvate ({len(current_meals_zi)} mese/zi):</b> {" • ".join(preview_parts)}'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
 
 # ==========================================
 # TAB 4: PROFIL (CU PIE CHART INTEGRAT GARANTAT)
