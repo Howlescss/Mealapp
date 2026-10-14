@@ -1,7 +1,0 @@
-streamlit
-google-genai
-plotly
-pandas
-Pillow
-streamlit-option-menu
-requests
