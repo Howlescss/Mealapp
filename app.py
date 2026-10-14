@@ -1,9 +1,29 @@
+import sys
+import subprocess
+import importlib
+
+# ==========================================
+# AUTO-INSTALLER PENTRU STREAMLIT CLOUD
+# ==========================================
+try:
+    from google import genai
+    from streamlit_option_menu import option_menu
+    import plotly.express as px
+except ImportError:
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        "google-genai", "streamlit-option-menu", "plotly", "pandas", "Pillow", "requests"
+    ])
+    importlib.invalidate_caches()
+    if "google" in sys.modules:
+        del sys.modules["google"]
+    from google import genai
+    from streamlit_option_menu import option_menu
+    import plotly.express as px
+
 import streamlit as st
-from google import genai
-import plotly.express as px
 import pandas as pd
 from PIL import Image
-from streamlit_option_menu import option_menu
 import streamlit.components.v1 as components
 import io
 import os
@@ -217,7 +237,6 @@ distributie_opts = [
 # MOTOR AUTO-SYNC PROFIL -> PLANIFICATOR
 # ==========================================
 def calculate_biometric_targets():
-    """Calculează BMR, Necesarul Kcal și gramele P/C/G exacte din datele profilului."""
     sex = st.session_state.sex
     varsta = st.session_state.varsta
     inaltime = st.session_state.inaltime
@@ -268,7 +287,6 @@ def calculate_biometric_targets():
         carb_calc = (tdee_vizual * 0.10) / 4.0
         gras_calc = (tdee_vizual * 0.70) / 9.0
     else:
-        # Echilibrat (25% P, 45% C, 30% G)
         prot_calc = (tdee_vizual * 0.25) / 4.0
         carb_calc = (tdee_vizual * 0.45) / 4.0
         gras_calc = (tdee_vizual * 0.30) / 9.0
@@ -303,7 +321,6 @@ def save_profile_to_db():
         save_local_db(st.session_state.db)
 
 def recalc_from_biometrics():
-    """Sincronizează automat orice modificare din Profil direct cu Planificatorul."""
     for k in ['sex', 'varsta', 'inaltime', 'greutate', 'activitate', 'obiectiv', 'ritm_slabire', 'distributie_macro', 'bf_proc']:
         ui_k = f"ui_{k}"
         if ui_k in st.session_state:
@@ -321,7 +338,6 @@ def recalc_from_biometrics():
     save_profile_to_db()
 
 def sync_manual_macros():
-    """Dacă utilizatorul editează manual gramele P/C/G, actualizează automat și Kcal în Planificator."""
     for k in ['prot_tinta', 'carb_tinta', 'gras_tinta']:
         ui_k = f"ui_{k}"
         if ui_k in st.session_state:
@@ -369,7 +385,6 @@ if 'init_done' not in st.session_state:
         'water_ml': 0, 'camera_active': False,
         'init_done': True
     })
-    # Dacă nu exista un profil salvat anterior, calculăm valorile inițiale din biometrie
     if not saved_prof:
         recalc_from_biometrics()
 
@@ -744,7 +759,7 @@ st.write("")
 view_to_show = selected_tab
 
 # ==========================================
-# TAB 1: PLANIFICATOR (SINCRONIZAT INSTANT CU PROFILUL)
+# TAB 1: PLANIFICATOR
 # ==========================================
 if view_to_show == "Planificator":
     kcal_zi_tinta = st.session_state.kcal_tinta
@@ -1278,7 +1293,7 @@ elif selected_tab == "Dietă & Mese":
                     st.session_state.config_mese[f"Ziua {zi}"] = mese_azi
 
 # ==========================================
-# TAB 4: PROFIL (CU AUTO-SYNC ÎN TIMP REAL SPRE PLANIFICATOR)
+# TAB 4: PROFIL
 # ==========================================
 elif selected_tab == "Profil":
     st.subheader("👤 Date Biometrice & Obiectiv (Auto-Sincronizare Activă)")
@@ -1342,7 +1357,7 @@ elif selected_tab == "Profil":
 
     with st.container(border=True):
         st.subheader("🎯 Țintă Macronutrienți / Persoană / Zi")
-        st.caption("Aceste valori se actualizează automat din datele tale de mai sus și sunt trimise direct în **Planificator** (le poți ajusta și manual dacă dorești):")
+        st.caption("Aceste valori se actualizează automat din datele tale de mai sus și sunt trimise direct în **Planificator**:")
         c1, c2, c3 = st.columns(3)
         with c1: st.number_input("🥩 Proteine (g)", 0, 500, key=init_ui('prot_tinta'), on_change=sync_manual_macros)
         with c2: st.number_input("🌾 Carbohidrați (g)", 0, 1000, key=init_ui('carb_tinta'), on_change=sync_manual_macros)
