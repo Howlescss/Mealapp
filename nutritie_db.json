@@ -1,0 +1,21 @@
+{
+  "preturi_magazine": {},
+  "catalog_nutritie": {},
+  "retetar_favorite": [],
+  "profil_utilizator": {
+    "sex": "Masculin",
+    "varsta": 24,
+    "inaltime": 175,
+    "greutate": 77.0,
+    "activitate": "Activitate redusă (1-2 antrenamente)",
+    "obiectiv": "Slăbire (Deficit caloric)",
+    "ritm_slabire": "Rapid (-25%)",
+    "distributie_macro": "Echilibrat (25% Proteine, 45% Carbo, 30% Grăsimi)",
+    "bf_proc": 20,
+    "prot_tinta": 113,
+    "carb_tinta": 203,
+    "gras_tinta": 60,
+    "kcal_tinta": 1803,
+    "stagnare_cals": 0
+  }
+}
